@@ -119,6 +119,8 @@ public sealed class MuxSession : IAsyncDisposable
                     bool alive = false;
                     for (int i = 0; i < 3 && !alive; i++)
                         alive = (await SendAtCommandAsync("AT", false, TimeSpan.FromSeconds(1), ct)).IsOk;
+                    if (!alive && _options.RecoverStuckMux)
+                        alive = await TryRecoverFromStuckMuxAsync(ct);
                     if (!alive)
                         Emit(LogLevel.Warning, "Модем не ответил OK на \"AT\" — пробую AT+CMUX всё равно");
                 }
@@ -128,6 +130,8 @@ public sealed class MuxSession : IAsyncDisposable
                     throw new MuxException($"Модем не перешёл в MUX: ответ на {_options.CmuxCommand} — {response}");
 
                 Emit(LogLevel.Info, $"Модем в режиме MUX, N1={MaxFrameSize}");
+                if (_options.OnMuxEntered is { } hook)
+                    await hook(ct); // например, переключить скорость порта вслед за модемом
                 await Task.Delay(_options.SwitchDelay, ct);
             }
 
@@ -147,6 +151,46 @@ public sealed class MuxSession : IAsyncDisposable
                 await ShutdownAsync(MuxSessionState.Faulted, ex.Message);
             throw;
         }
+    }
+
+    /// <summary>
+    /// Модем молчит на AT — обычно он остался в режиме MUX после аварийного завершения программы
+    /// или отключения кабеля. Отправляем ему закрытие мультиплексора (CLD и DISC на DLC0) и проверяем AT снова.
+    /// Если модем был в AT-режиме, эти байты он просто проигнорирует как мусор.
+    /// </summary>
+    private async Task<bool> TryRecoverFromStuckMuxAsync(CancellationToken ct)
+    {
+        Emit(LogLevel.Warning, "Модем не отвечает на AT — возможно, он остался в режиме MUX после сбоя. Отправляю закрытие MUX (CLD, DISC)…");
+        var close = new List<byte> { FrameConstants.Flag, FrameConstants.Flag };
+        close.AddRange(FrameEncoder.Uih(0, ControlMessage.CloseDown().Encode()));
+        close.AddRange(FrameEncoder.Disc(0));
+        await WriteRawAsync(close.ToArray(), ct);
+        await Task.Delay(_options.RecoveryDelay, ct);
+
+        for (int i = 0; i < 3; i++)
+        {
+            if ((await SendAtCommandAsync("AT", false, TimeSpan.FromSeconds(1), ct)).IsOk)
+            {
+                Emit(LogLevel.Info, "Модем вернулся в AT-режим");
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private async Task WriteRawAsync(byte[] data, CancellationToken ct)
+    {
+        await _writeLock.WaitAsync(ct);
+        try
+        {
+            await _stream.WriteAsync(data, 0, data.Length, ct);
+            await _stream.FlushAsync(ct);
+        }
+        finally
+        {
+            _writeLock.Release();
+        }
+        RawTraffic?.Invoke(TrafficDirection.Tx, data);
     }
 
     /// <summary>Отправляет AT-команду в текстовом режиме и ждёт финального результата.</summary>

@@ -8,6 +8,10 @@ on:
 jobs:
   build:
     runs-on: windows-latest
+    env:
+      # Необязательная подпись кода: секреты репозитория SIGN_PFX_BASE64 (сертификат .pfx в base64) и SIGN_PASSWORD.
+      SIGN_PFX_BASE64: ${{ secrets.SIGN_PFX_BASE64 }}
+      SIGN_PASSWORD: ${{ secrets.SIGN_PASSWORD }}
     steps:
       - uses: actions/checkout@v4
 
@@ -20,6 +24,16 @@ jobs:
 
       - name: Test (net8.0 + net48)
         run: dotnet test tests/MuxTerminal.Core.Tests -c Release --no-build
+
+      - name: Sign
+        if: env.SIGN_PFX_BASE64 != ''
+        shell: pwsh
+        run: |
+          $pfx = Join-Path $env:RUNNER_TEMP 'sign.pfx'
+          [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:SIGN_PFX_BASE64))
+          $signtool = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin" -Recurse -Filter signtool.exe | Where-Object FullName -like '*x64*' | Select-Object -Last 1
+          & $signtool.FullName sign /f $pfx /p $env:SIGN_PASSWORD /fd sha256 /tr http://timestamp.digicert.com /td sha256 /d "GSM 07.10 MUX Terminal" src/MuxTerminal.App/bin/Release/net48/MuxTerminal.exe
+          Remove-Item $pfx
 
       - uses: actions/upload-artifact@v4
         with:

@@ -20,6 +20,7 @@
             <RowDefinition Height="Auto" />
             <RowDefinition Height="*" />
             <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
         </Grid.RowDefinitions>
 
         <!-- Панель инструментов вкладки -->
@@ -67,10 +68,29 @@
                        IsReadOnly="True" WordWrap="True" ShowLineNumbers="False"
                        FontSize="13" Padding="4"
                        VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Auto"
-                       Background="#FF1E1E1E" Foreground="#FFDCDCDC" />
+                       Background="#FF1E1E1E" Foreground="#FFDCDCDC">
+            <ae:TextEditor.ContextMenu>
+                <ContextMenu Opened="OutputMenu_Opened">
+                    <MenuItem Header="Копировать" Click="Copy_Click" InputGestureText="Ctrl+C" />
+                    <MenuItem Header="Выделить всё" Click="SelectAll_Click" InputGestureText="Ctrl+A" />
+                    <MenuItem Header="Найти…" Click="Find_Click" InputGestureText="Ctrl+F" />
+                    <Separator />
+                    <MenuItem x:Name="SaveSelectionMenu" Header="Сохранить выделенное…" Click="SaveSelection_Click" />
+                    <MenuItem Header="Сохранить всё…" Click="SaveAll_Click" />
+                    <MenuItem Header="Очистить" Click="Clear_Click" />
+                    <Separator x:Name="RenameSeparator" />
+                    <MenuItem x:Name="RenameMenu" Header="Переименовать вкладку…" Click="Rename_Click" InputGestureText="F2" />
+                </ContextMenu>
+            </ae:TextEditor.ContextMenu>
+        </ae:TextEditor>
+
+        <!-- Быстрые команды (настраиваются: Настройки → Отображение и подсветка → Быстрые команды) -->
+        <Border x:Name="MacroPanel" Grid.Row="2" BorderThickness="0,1,0,0" BorderBrush="#FFD0D0D0" Background="#FFF5F6F7" Padding="4,3,4,0">
+            <WrapPanel x:Name="MacroBar" />
+        </Border>
 
         <!-- Ввод команд -->
-        <Border x:Name="InputPanel" Grid.Row="2" BorderThickness="0,1,0,0" BorderBrush="#FFD0D0D0" Background="#FFF5F6F7" Padding="4">
+        <Border x:Name="InputPanel" Grid.Row="3" BorderThickness="0,1,0,0" BorderBrush="#FFD0D0D0" Background="#FFF5F6F7" Padding="4">
             <DockPanel>
                 <StackPanel Orientation="Horizontal" DockPanel.Dock="Right">
                     <ComboBox x:Name="LineEndingCombo" Width="80" Margin="4,0" SelectedIndex="0" ToolTip="Окончание строки при отправке">
@@ -82,9 +102,11 @@
                     <CheckBox x:Name="HexInputCheck" Content="HEX-ввод" ToolTip="Вводить байты в HEX: 41 54 0D" />
                     <Button Style="{StaticResource ToolButton}" Content="Ctrl+Z" Click="CtrlZ_Click" ToolTip="Отправить текст из строки ввода и 0x1A — завершение SMS после AT+CMGS" />
                     <Button Style="{StaticResource ToolButton}" Content="Esc" Click="Esc_Click" ToolTip="Отправить 0x1B — отмена ввода SMS" />
+                    <Button x:Name="SendFileButton" Style="{StaticResource ToolButton}" Content="Файл…" Click="SendFile_Click"
+                            ToolTip="Отправить файл: построчно как команды или как двоичные данные" />
                     <Button x:Name="SendButton" Content="Отправить" Padding="12,2" Click="Send_Click" IsDefault="False" />
                 </StackPanel>
-                <TextBox x:Name="Input" FontSize="13" VerticalContentAlignment="Center"
+                <TextBox x:Name="Input" FontSize="13" VerticalContentAlignment="Center" DataObject.Pasting="Input_Pasting"
                          PreviewKeyDown="Input_PreviewKeyDown" ToolTip="Enter — отправить, стрелки вверх/вниз — история команд, Ctrl+Z — отправить текст и 0x1A (SMS)" />
             </DockPanel>
         </Border>

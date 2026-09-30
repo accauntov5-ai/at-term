@@ -16,6 +16,7 @@ public partial class SettingsWindow : Window
     private readonly Action<DisplaySettings> _apply;
     private DisplaySettings _settings;
     private ObservableCollection<HighlightRule> _rules = new();
+    private ObservableCollection<QuickCommand> _macros = new();
 
     public SettingsWindow(DisplaySettings current, Action<DisplaySettings> apply)
     {
@@ -47,6 +48,11 @@ public partial class SettingsWindow : Window
         CategoryGrid.ItemsSource = _settings.Categories;
         _rules = new ObservableCollection<HighlightRule>(_settings.Rules);
         RuleGrid.ItemsSource = _rules;
+        _macros = new ObservableCollection<QuickCommand>(_settings.Macros ?? DisplaySettings.DefaultMacros());
+        MacroList.ItemsSource = _macros;
+        MacroTextBox.FontFamily = MonoFonts.Get(null);
+        if (_macros.Count > 0)
+            MacroList.SelectedIndex = 0;
         UpdateTest();
     }
 
@@ -94,6 +100,13 @@ public partial class SettingsWindow : Window
                 r.Name = name;
         }
         _settings.Rules = _rules.ToList();
+
+        foreach (var m in _macros)
+        {
+            if (m.DelayMs < 0 || m.TimeoutMs < 100)
+                return $"Быстрая команда «{m}»: пауза не может быть отрицательной, таймаут — не меньше 100 мс.";
+        }
+        _settings.Macros = _macros.ToList();
         return null;
     }
 
@@ -245,6 +258,59 @@ public partial class SettingsWindow : Window
                     break;
                 }
         RuleGrid.Items.Refresh();
+    }
+
+    // ───────────── Быстрые команды ─────────────
+
+    private void MacroList_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        MacroEditor.DataContext = MacroList.SelectedItem;
+        MacroEditor.IsEnabled = MacroList.SelectedItem is not null;
+    }
+
+    private void MacroName_TextChanged(object sender, TextChangedEventArgs e)
+    {
+        // Название в списке слева обновляем на лету (QuickCommand без уведомлений об изменениях).
+        if (MacroList.SelectedItem is { } selected && MacroNameBox.IsKeyboardFocused)
+        {
+            MacroList.Items.Refresh();
+            MacroList.SelectedItem = selected;
+        }
+    }
+
+    private void AddMacro_Click(object sender, RoutedEventArgs e)
+    {
+        var macro = new QuickCommand { Name = "Новая команда", Text = "AT" };
+        _macros.Add(macro);
+        MacroList.SelectedItem = macro;
+        MacroNameBox.Focus();
+        MacroNameBox.SelectAll();
+    }
+
+    private void DeleteMacro_Click(object sender, RoutedEventArgs e)
+    {
+        if (MacroList.SelectedItem is QuickCommand m)
+            _macros.Remove(m);
+    }
+
+    private void MoveMacro_Click(object sender, RoutedEventArgs e)
+    {
+        if (MacroList.SelectedItem is not QuickCommand m)
+            return;
+        int from = _macros.IndexOf(m);
+        int to = from + int.Parse((string)((Button)sender).Tag, CultureInfo.InvariantCulture);
+        if (to < 0 || to >= _macros.Count)
+            return;
+        _macros.Move(from, to);
+        MacroList.SelectedItem = m;
+    }
+
+    private void ResetMacros_Click(object sender, RoutedEventArgs e)
+    {
+        _macros.Clear();
+        foreach (var m in DisplaySettings.DefaultMacros())
+            _macros.Add(m);
+        MacroList.SelectedIndex = 0;
     }
 
     // ───────────── Правила ─────────────

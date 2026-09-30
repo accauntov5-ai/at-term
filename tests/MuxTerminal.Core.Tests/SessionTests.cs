@@ -1,6 +1,7 @@
 using System.Collections.Concurrent;
 using System.Text;
 using MuxTerminal.Core.Emulator;
+using MuxTerminal.Core.Protocol;
 using MuxTerminal.Core.Session;
 using MuxTerminal.Core.Transport;
 using MuxTerminal.Core.Util;
@@ -200,6 +201,85 @@ public class SessionTests
         Assert.Equal(MuxSessionState.Faulted, session.State);
     }
 
+    /// <summary>Программа «упала», модем остался в MUX: новая сессия должна закрыть старый MUX и запуститься.</summary>
+    [Fact]
+    public async Task RecoversModemStuckInMux()
+    {
+        var (client, modem) = InMemoryDuplexStream.CreatePair();
+        var emulator = new ModemEmulator(modem);
+        emulator.Start();
+        await using (emulator)
+        {
+            // Предыдущий сеанс: AT+CMUX и SABM DLC0, затем «падение» без CLD.
+            var cmux = Encoding.ASCII.GetBytes("AT+CMUX=0\r");
+            await client.WriteAsync(cmux, 0, cmux.Length);
+            await DrainAsync(client, 300);
+            var sabm = FrameEncoder.Sabm(0);
+            await client.WriteAsync(sabm, 0, sabm.Length);
+            await DrainAsync(client, 300);
+            Assert.True(emulator.InMuxMode);
+
+            var session = new MuxSession(client, new MuxSessionOptions
+            {
+                Channels = new[] { 1 },
+                SwitchDelay = TimeSpan.Zero,
+                RecoveryDelay = TimeSpan.FromMilliseconds(100),
+            });
+            var log = new List<string>();
+            session.Log += (_, m) => { lock (log) log.Add(m); };
+            await session.StartAsync();
+            Assert.Equal(MuxSessionState.Running, session.State);
+            lock (log) Assert.Contains(log, m => m.Contains("вернулся в AT-режим"));
+            await session.StopAsync();
+        }
+    }
+
+    [Fact]
+    public async Task ModemRebootFaultsSession()
+    {
+        var (transport, session, _) = await StartAsync("AT+CMUX=0", 1);
+        await using (transport)
+        {
+            var faulted = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            session.StateChanged += s => { if (s == MuxSessionState.Faulted) faulted.TrySetResult(true); };
+            await session.SendDataAsync(1, "AT+CFUN=1,1\r"u8.ToArray());
+            Assert.True(await faulted.Task.WithTimeout(TimeSpan.FromSeconds(3)));
+            Assert.Equal(ChannelState.Closed, session.GetChannelState(1));
+        }
+    }
+
+    [Fact]
+    public async Task OnMuxEnteredHookRunsBeforeSabm()
+    {
+        var transport = new EmulatorTransport();
+        await using (transport)
+        {
+            bool called = false;
+            var session = new MuxSession(transport.Stream, new MuxSessionOptions
+            {
+                Channels = new[] { 1 },
+                SwitchDelay = TimeSpan.Zero,
+                OnMuxEntered = _ => { called = transport.Emulator.OpenChannels.Count == 0; return Task.CompletedTask; },
+            });
+            await session.StartAsync();
+            Assert.True(called);
+        }
+    }
+
+    private static async Task DrainAsync(Stream stream, int ms)
+    {
+        var buffer = new byte[4096];
+        using var cts = new CancellationTokenSource(ms);
+        try
+        {
+            while (true)
+                await stream.ReadAsync(buffer, 0, buffer.Length, cts.Token);
+        }
+        catch (OperationCanceledException)
+        {
+        }
+    }
+
     [Fact]
     public void FindsFinalResultAfterEcho()
     {
@@ -219,4 +299,11 @@ public class SessionTests
         Assert.Equal(mode, p.Mode);
         Assert.Equal(n1, p.N1);
     }
+
+    [Theory]
+    [InlineData("AT+CMUX=0", null)]
+    [InlineData("AT+CMUX=0,0,5,127", 115200)]
+    [InlineData("AT+CMUX=0,0,6", 230400)]
+    [InlineData("AT+CMUX=0,0,1,31", 9600)]
+    public void MapsPortSpeed(string cmd, int? baud) => Assert.Equal(baud, CmuxParameters.Parse(cmd).PortBaudRate);
 }

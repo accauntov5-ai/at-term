@@ -50,6 +50,9 @@ public partial class TerminalPane : UserControl
     private bool _atLineStart = true;
     private bool _pendingCr;
     private int _historyIndex = -1;
+    private int _newLines;
+    private TaskCompletionSource<string>? _resultWaiter;
+    private CancellationTokenSource? _macroCts;
     private ChannelState _state = ChannelState.Closed;
 
     // Сбор строк для «Копилки» идёт по принятому тексту независимо от режима отображения.
@@ -98,6 +101,9 @@ public partial class TerminalPane : UserControl
             CloseChannelButton.Visibility = channelOnly;
             EchoCheck.Visibility = channelOnly;
             StatePanel.Visibility = channelOnly;
+            MacroPanel.Visibility = channelOnly;
+            RenameMenu.Visibility = channelOnly;
+            RenameSeparator.Visibility = channelOnly;
             DataFramesCheck.Visibility = value ? Visibility.Visible : Visibility.Collapsed;
             if (value)
                 TimestampCheck.IsChecked = true;
@@ -125,6 +131,9 @@ public partial class TerminalPane : UserControl
     public event Action<TerminalPane>? OpenChannelRequested;
     public event Action<TerminalPane>? CloseChannelRequested;
     public event Action<CollectedEntry>? Collected;
+    public event Action<TerminalPane>? RenameRequested;
+    /// <summary>Приняты новые строки (для счётчика непрочитанного на неактивной вкладке).</summary>
+    public event Action<TerminalPane, int>? NewLines;
 
     /// <summary>Применяет оформление и правила поиска; вывод перерисовывается целиком.</summary>
     public void ApplyDisplay(DisplaySettings display, List<CompiledRule> rules)
@@ -137,6 +146,7 @@ public partial class TerminalPane : UserControl
         Output.Background = Brushes2.Parse(display.Background) ?? Brushes.Black;
         Output.Foreground = Brushes2.Parse(display.Foreground) ?? Brushes.Gainsboro;
         Input.FontFamily = font;
+        BuildMacroBar(display.Macros ?? new List<QuickCommand>());
         RenderAll();
     }
 
@@ -202,6 +212,12 @@ public partial class TerminalPane : UserControl
             _history.Add(chunk);
             CollectFrom(chunk);
             Render(chunk, buf);
+        }
+        if (_newLines > 0)
+        {
+            int n = _newLines;
+            _newLines = 0;
+            NewLines?.Invoke(this, n);
         }
         if (_history.Count > MaxChunks)
             _history.RemoveRange(0, _history.Count - MaxChunks * 4 / 5);
@@ -367,15 +383,18 @@ public partial class TerminalPane : UserControl
 
     // ───────────── Копилка ─────────────
 
+    /// <summary>
+    /// Разбор принятого текста на строки независимо от режима отображения: «Копилка», счётчик новых строк
+    /// и ожидание ответа модема для быстрых команд.
+    /// </summary>
     private void CollectFrom(TerminalChunk chunk)
     {
-        if (Collected is null || !Rules.Any(r => r.Rule.Collect))
-            return;
+        bool collect = Collected is not null && Rules.Any(r => r.Rule.Collect);
 
         if (IsLogMode)
         {
             // В логе — только сообщения терминала и ошибки (данные каналов собираются в их вкладках).
-            if (chunk.Kind is ChunkKind.Info or ChunkKind.Error && chunk.Text is not null)
+            if (collect && chunk.Kind is ChunkKind.Info or ChunkKind.Error && chunk.Text is not null)
                 foreach (var line in chunk.Text.Split('\n'))
                     TryCollect(line, chunk.Time);
             return;
@@ -390,7 +409,14 @@ public partial class TerminalPane : UserControl
             if (c is '\r' or '\n')
             {
                 if (_collectLine.Length > 0)
-                    TryCollect(_collectLine.ToString(), chunk.Time);
+                {
+                    var line = _collectLine.ToString();
+                    _newLines++;
+                    if (collect)
+                        TryCollect(line, chunk.Time);
+                    if (IsFinalResult(line.Trim()))
+                        _resultWaiter?.TrySetResult(line.Trim());
+                }
                 _collectLine.Clear();
             }
             else if (_collectLine.Length < MaxCollectLine)
@@ -398,7 +424,16 @@ public partial class TerminalPane : UserControl
                 _collectLine.Append(c);
             }
         }
+        // Приглашение «> » после AT+CMGS приходит без перевода строки.
+        if (_collectLine.Length > 0 && _collectLine.ToString().Trim() == ">")
+            _resultWaiter?.TrySetResult(">");
     }
+
+    private static bool IsFinalResult(string line)
+        => line is "OK" or "ERROR" or "NO CARRIER" or "BUSY" or "NO ANSWER" or "NO DIALTONE" or "CONNECT"
+           || line.StartsWith("+CME ERROR", StringComparison.Ordinal)
+           || line.StartsWith("+CMS ERROR", StringComparison.Ordinal)
+           || line.StartsWith("CONNECT ", StringComparison.Ordinal);
 
     private void TryCollect(string line, DateTime time)
     {
@@ -447,6 +482,8 @@ public partial class TerminalPane : UserControl
         bool open = state == ChannelState.Open;
         Input.IsEnabled = open;
         SendButton.IsEnabled = open;
+        MacroBar.IsEnabled = open;
+        SendFileButton.IsEnabled = open;
         OpenChannelButton.IsEnabled = running && state is ChannelState.Closed or ChannelState.Failed;
         CloseChannelButton.IsEnabled = running && open;
     }
@@ -455,18 +492,20 @@ public partial class TerminalPane : UserControl
 
     // ───────────── Отправка ─────────────
 
-    private async Task SendAsync(byte[] data)
+    private async Task<bool> SendAsync(byte[] data)
     {
         if (SendHandler is null || data.Length == 0)
-            return;
+            return false;
         try
         {
             await SendHandler(data);
             Append(ChunkKind.Tx, data);
+            return true;
         }
         catch (Exception ex)
         {
             AppendInfo("Ошибка отправки: " + ex.Message, ChunkKind.Error);
+            return false;
         }
     }
 

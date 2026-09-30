@@ -88,6 +88,25 @@ public sealed class HighlightRule
     }
 }
 
+/// <summary>
+/// Быстрая команда (макрос): кнопка на панели каждой вкладки канала. Каждая строка текста — отдельная команда;
+/// поддерживаются ^Z (Ctrl+Z, 0x1A), \xHH, \r, \n. Строка вида «#wait 1000» — пауза в миллисекундах.
+/// </summary>
+public sealed class QuickCommand
+{
+    public bool Enabled { get; set; } = true;
+    public string Name { get; set; } = "";
+    public string Text { get; set; } = "";
+    /// <summary>Пауза между строками, мс.</summary>
+    public int DelayMs { get; set; } = 200;
+    /// <summary>Перед следующей строкой ждать ответ модема (OK, ERROR, +CME/+CMS ERROR, приглашение «&gt;»).</summary>
+    public bool WaitForResult { get; set; } = true;
+    /// <summary>Таймаут ожидания ответа, мс.</summary>
+    public int TimeoutMs { get; set; } = 5000;
+
+    public override string ToString() => string.IsNullOrWhiteSpace(Name) ? "(без названия)" : Name;
+}
+
 /// <summary>Правило, готовое к применению (кисти и выражение созданы один раз).</summary>
 public sealed class CompiledRule
 {
@@ -116,6 +135,7 @@ public sealed class DisplaySettings
     public string TimestampFormat { get; set; } = "HH:mm:ss.fff";
     public List<CategoryStyle> Categories { get; set; } = new();
     public List<HighlightRule> Rules { get; set; } = new();
+    public List<QuickCommand>? Macros { get; set; }
 
     public static readonly string[] TimestampFormats =
     {
@@ -130,8 +150,21 @@ public sealed class DisplaySettings
         var s = new DisplaySettings();
         s.Normalize();
         s.Rules = DefaultRules();
+        s.Macros = DefaultMacros();
         return s;
     }
+
+    public static List<QuickCommand> DefaultMacros() => new()
+    {
+        new() { Name = "ATI", Text = "ATI" },
+        new() { Name = "Сигнал", Text = "AT+CSQ" },
+        new() { Name = "Регистрация", Text = "AT+CREG?\nAT+COPS?" },
+        new() { Name = "SIM", Text = "AT+CPIN?" },
+        new() { Name = "Инфо о модеме", Text = "AT+CGMI\nAT+CGMM\nAT+CGMR\nAT+CGSN" },
+        new() { Name = "SMS: текст. режим", Text = "AT+CMGF=1" },
+        new() { Name = "SMS: список", Text = "AT+CMGF=1\nAT+CMGL=\"ALL\"" },
+        new() { Name = "Эхо выкл.", Text = "ATE0" },
+    };
 
     public static List<HighlightRule> DefaultRules() => new()
     {
@@ -161,6 +194,7 @@ public sealed class DisplaySettings
             if (Categories.All(x => x.Category != c))
                 Categories.Add(DefaultStyle(c));
         Categories = Categories.GroupBy(c => c.Category).Select(g => g.First()).OrderBy(c => c.Category).ToList();
+        Macros ??= DefaultMacros();
         if (FontSize is < 6 or > 48)
             FontSize = 13;
         if (!IsValidTimestampFormat(TimestampFormat))

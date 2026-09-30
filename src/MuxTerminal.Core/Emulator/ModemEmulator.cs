@@ -55,6 +55,9 @@ public sealed class ModemEmulator : IAsyncDisposable
     public long FrameErrors => Interlocked.Read(ref _frameErrors);
     public IReadOnlyCollection<int> OpenChannels => _open.Keys.Where(k => k > 0).OrderBy(k => k).ToArray();
 
+    /// <summary>Эмулятор «перезагрузился» по AT+CFUN=1,1 и разорвал связь.</summary>
+    public event Action? Disconnected;
+
     /// <summary>Полученные командные строки (DLCI, строка) — для тестов и отладки.</summary>
     public event Action<int, string>? CommandReceived;
 
@@ -249,6 +252,18 @@ public sealed class ModemEmulator : IAsyncDisposable
                 if (line.Length == 0)
                     continue;
                 CommandReceived?.Invoke(dlci, line);
+                if (line.Equals("AT+CFUN=1,1", StringComparison.OrdinalIgnoreCase))
+                {
+                    // Перезагрузка модема: USB-модем при этом пропадает из системы — имитируем обрыв порта.
+                    await SendDataAsync(dlci, Encoding.ASCII.GetBytes("\r\nOK\r\n"));
+                    _ = Task.Run(async () =>
+                    {
+                        await Task.Delay(200);
+                        Disconnected?.Invoke();
+                        _stream.Dispose();
+                    });
+                    continue;
+                }
                 if (line.Equals("AT+BINTEST", StringComparison.OrdinalIgnoreCase))
                 {
                     var bin = Enumerable.Range(0, 256).Select(x => (byte)x).ToArray();

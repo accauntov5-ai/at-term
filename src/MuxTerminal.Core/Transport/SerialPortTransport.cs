@@ -26,6 +26,9 @@ public sealed class SerialPortTransport : IMuxTransport
     public string Name => $"{_port.PortName} @ {_port.BaudRate}";
     public Stream Stream { get; }
 
+    /// <summary>Меняет скорость открытого порта (модем переключился по параметру port_speed в AT+CMUX).</summary>
+    public void SetBaudRate(int baudRate) => _port.BaudRate = baudRate;
+
     public static SerialPortTransport Open(SerialPortSettings settings)
     {
         var port = new SerialPort(settings.PortName, settings.BaudRate, Parity.None, 8, StopBits.One)

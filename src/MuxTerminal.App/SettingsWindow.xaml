@@ -193,6 +193,59 @@
                     </DataGrid>
                 </DockPanel>
             </TabItem>
+            <TabItem Header="Быстрые команды">
+                <DockPanel Margin="8">
+                    <TextBlock DockPanel.Dock="Top" TextWrapping="Wrap" Foreground="#FF555555" Margin="0,0,0,8"
+                               Text="Кнопки над строкой ввода в каждой вкладке канала. Каждая строка — отдельная команда; ^Z — Ctrl+Z (0x1A), \xHH — любой байт, \r \n — перевод строки, «#wait 1000» — пауза в мс. Повторное нажатие кнопки во время выполнения — остановка." />
+                    <Grid>
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="230" />
+                            <ColumnDefinition Width="12" />
+                            <ColumnDefinition Width="*" />
+                        </Grid.ColumnDefinitions>
+                        <DockPanel>
+                            <UniformGrid DockPanel.Dock="Bottom" Columns="2" Margin="0,6,0,0">
+                                <Button Content="Добавить" Margin="0,0,3,3" Padding="4,2" Click="AddMacro_Click" />
+                                <Button Content="Удалить" Margin="3,0,0,3" Padding="4,2" Click="DeleteMacro_Click" />
+                                <Button Content="Вверх" Margin="0,0,3,3" Padding="4,2" Click="MoveMacro_Click" Tag="-1" />
+                                <Button Content="Вниз" Margin="3,0,0,3" Padding="4,2" Click="MoveMacro_Click" Tag="1" />
+                                <Button Content="По умолчанию" Margin="0,0,3,0" Padding="4,2" Click="ResetMacros_Click" />
+                            </UniformGrid>
+                            <ListBox x:Name="MacroList" SelectionChanged="MacroList_SelectionChanged" />
+                        </DockPanel>
+                        <Grid x:Name="MacroEditor" Grid.Column="2" IsEnabled="False">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="Auto" />
+                                <ColumnDefinition Width="*" />
+                            </Grid.ColumnDefinitions>
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="Auto" />
+                                <RowDefinition Height="Auto" />
+                                <RowDefinition Height="*" />
+                                <RowDefinition Height="Auto" />
+                                <RowDefinition Height="Auto" />
+                            </Grid.RowDefinitions>
+                            <CheckBox Grid.ColumnSpan="2" Content="Показывать кнопку" IsChecked="{Binding Enabled}" Margin="0,0,0,8" />
+                            <TextBlock Grid.Row="1" Text="Название:" VerticalAlignment="Center" Margin="0,0,8,6" />
+                            <TextBox x:Name="MacroNameBox" Grid.Row="1" Grid.Column="1" Margin="0,0,0,6"
+                                     Text="{Binding Name, UpdateSourceTrigger=PropertyChanged}" TextChanged="MacroName_TextChanged" />
+                            <TextBlock Grid.Row="2" Text="Команды:" Margin="0,2,8,0" />
+                            <TextBox x:Name="MacroTextBox" Grid.Row="2" Grid.Column="1" AcceptsReturn="True" TextWrapping="NoWrap"
+                                     VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Auto"
+                                     Text="{Binding Text, UpdateSourceTrigger=PropertyChanged}" />
+                            <StackPanel Grid.Row="3" Grid.ColumnSpan="2" Orientation="Horizontal" Margin="0,8,0,0">
+                                <TextBlock Text="Пауза между строками, мс:" VerticalAlignment="Center" Margin="0,0,6,0" />
+                                <TextBox Width="60" Text="{Binding DelayMs}" />
+                            </StackPanel>
+                            <StackPanel Grid.Row="4" Grid.ColumnSpan="2" Orientation="Horizontal" Margin="0,6,0,0">
+                                <CheckBox Content="Ждать ответа модема (OK / ERROR / &gt;) перед следующей строкой, таймаут, мс:"
+                                          IsChecked="{Binding WaitForResult}" VerticalAlignment="Center" Margin="0,0,6,0" />
+                                <TextBox Width="60" Text="{Binding TimeoutMs}" />
+                            </StackPanel>
+                        </Grid>
+                    </Grid>
+                </DockPanel>
+            </TabItem>
         </TabControl>
     </DockPanel>
 </Window>

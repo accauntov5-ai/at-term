@@ -19,6 +19,18 @@ public sealed class MuxSessionOptions
     /// <summary>Каналы, открываемые при старте (помимо DLC0).</summary>
     public IReadOnlyList<int> Channels { get; set; } = new[] { 1, 2, 3 };
 
+    /// <summary>Если модем молчит на AT, попробовать закрыть «зависший» MUX (CLD + DISC) и повторить.</summary>
+    public bool RecoverStuckMux { get; set; } = true;
+
+    /// <summary>Пауза после команд закрытия MUX, прежде чем снова слать AT.</summary>
+    public TimeSpan RecoveryDelay { get; set; } = TimeSpan.FromMilliseconds(500);
+
+    /// <summary>
+    /// Вызывается сразу после OK на AT+CMUX, до SABM. Нужен, если в AT+CMUX указана другая скорость порта:
+    /// модем переключается на неё, и порт надо переключить следом.
+    /// </summary>
+    public Func<CancellationToken, Task>? OnMuxEntered { get; set; }
+
     /// <summary>Таймаут ответа на AT-команду.</summary>
     public TimeSpan AtTimeout { get; set; } = TimeSpan.FromSeconds(3);
 
@@ -45,8 +57,23 @@ public sealed class MuxSessionOptions
 }
 
 /// <summary>Параметры команды AT+CMUX.</summary>
-public sealed record CmuxParameters(int Mode, int N1)
+/// <param name="PortSpeed">Код скорости порта (3-й параметр), null — не указан (модем не меняет скорость).</param>
+public sealed record CmuxParameters(int Mode, int N1, int? PortSpeed = null)
 {
+    /// <summary>Коды &lt;port_speed&gt; по 3GPP TS 27.007.</summary>
+    private static readonly Dictionary<int, int> Speeds = new()
+    {
+        [1] = 9600,
+        [2] = 19200,
+        [3] = 38400,
+        [4] = 57600,
+        [5] = 115200,
+        [6] = 230400,
+    };
+
+    /// <summary>Скорость порта, на которую модем перейдёт после AT+CMUX (null — не меняет/неизвестно).</summary>
+    public int? PortBaudRate => PortSpeed is { } code && Speeds.TryGetValue(code, out var baud) ? baud : null;
+
     public static CmuxParameters Parse(string command)
     {
         int eq = command.IndexOf('=');
@@ -57,7 +84,7 @@ public sealed record CmuxParameters(int Mode, int N1)
         int n1 = TryInt(parts, 3) ?? FrameConstants.DefaultN1;
         if (n1 is < 1 or > FrameConstants.MaxLength)
             n1 = FrameConstants.DefaultN1;
-        return new CmuxParameters(mode, n1);
+        return new CmuxParameters(mode, n1, TryInt(parts, 2));
     }
 
     private static int? TryInt(string[] parts, int index)

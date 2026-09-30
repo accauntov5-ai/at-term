@@ -18,11 +18,19 @@
             <MenuItem Header="_Файл">
                 <MenuItem Header="Сохранить содержимое вкладки…" Click="SaveLog_Click" />
                 <Separator />
+                <MenuItem x:Name="SessionLogMenu" Header="Записывать журнал сеанса" IsCheckable="True" Click="SessionLogMenu_Click"
+                          ToolTip="Каждый сеанс — в отдельный файл в папке журналов" />
+                <MenuItem x:Name="RawFramesLogMenu" Header="…включая сырые MUX-кадры" IsCheckable="True" Click="SessionLogMenu_Click" />
+                <MenuItem Header="Открыть папку журналов" Click="OpenLogs_Click" />
+                <MenuItem Header="Открыть журнал ошибок (crash.log)" Click="OpenCrashLog_Click" />
+                <Separator />
                 <MenuItem Header="Выход" Click="Exit_Click" />
             </MenuItem>
             <MenuItem Header="_Настройки">
                 <MenuItem Header="Отображение и подсветка…" Click="DisplaySettings_Click" InputGestureText="Ctrl+Shift+S" />
                 <MenuItem Header="Показать копилку" Click="ShowCollector_Click" />
+                <Separator />
+                <MenuItem Header="Переименовать вкладку канала…" Click="RenameTab_Click" InputGestureText="F2" />
             </MenuItem>
             <MenuItem Header="_Окна" SubmenuOpened="WindowsMenu_SubmenuOpened">
                 <MenuItem Header="Вынести в отдельное окно" Click="LayoutMenu_Click" Tag="float" InputGestureText="Ctrl+Shift+O" />
@@ -45,6 +53,13 @@
         <!-- Панель подключения -->
         <Border DockPanel.Dock="Top" Background="#FFEEF1F5" BorderBrush="#FFCCCCCC" BorderThickness="0,0,0,1" Padding="4,6">
             <WrapPanel>
+                <StackPanel Orientation="Horizontal" Margin="0,2,8,2">
+                    <TextBlock Style="{StaticResource Label}" Text="Профиль:" Margin="4,0,4,0" />
+                    <ComboBox x:Name="ProfileCombo" Width="140" SelectionChanged="ProfileCombo_SelectionChanged"
+                              ToolTip="Сохранённые параметры подключения для разных модемов" />
+                    <Button Content="Сохранить" Padding="6,0" Margin="2,0,0,0" Click="SaveProfile_Click" ToolTip="Сохранить текущие параметры как профиль" />
+                    <Button Content="Удалить" Padding="6,0" Margin="2,0,0,0" Click="DeleteProfile_Click" ToolTip="Удалить выбранный профиль" />
+                </StackPanel>
                 <StackPanel Orientation="Horizontal" Margin="0,2">
                     <TextBlock Style="{StaticResource Label}" Text="Порт:" Margin="4,0,4,0" />
                     <ComboBox x:Name="PortCombo" Width="150" IsEditable="True" />
@@ -70,6 +85,8 @@
                 <StackPanel Orientation="Horizontal" Margin="8,2,0,2">
                     <Button x:Name="StartButton" Content="Старт MUX" Padding="12,3" Click="Start_Click" FontWeight="SemiBold" />
                     <Button x:Name="StopButton" Content="Стоп MUX" Padding="12,3" Margin="6,0,0,0" Click="Stop_Click" IsEnabled="False" />
+                    <CheckBox x:Name="AutoReconnectCheck" Content="Переподключаться" VerticalAlignment="Center" Margin="8,0,0,0"
+                              ToolTip="Если связь с модемом потеряна (порт пропал, модем перезагрузился) — подключаться снова каждые 5 секунд" />
                     <TextBlock Style="{StaticResource Label}" Text="DLC:" Margin="16,0,4,0" />
                     <TextBox x:Name="ExtraDlcBox" Width="34" Text="4" VerticalContentAlignment="Center" />
                     <Button x:Name="AddChannelButton" Content="+ Открыть канал" Padding="8,3" Margin="4,0,0,0" Click="AddChannel_Click" IsEnabled="False"

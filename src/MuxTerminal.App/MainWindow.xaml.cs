@@ -1,5 +1,7 @@
 using System.Collections.Concurrent;
 using System.ComponentModel;
+using System.Diagnostics;
+using System.Globalization;
 using System.IO;
 using System.Reflection;
 using System.Windows;
@@ -29,7 +31,7 @@ public partial class MainWindow : Window
 
     private readonly AppSettings _settings = AppSettings.Load();
     private readonly TerminalPane _logPane;
-    private readonly LayoutDocument _logDoc;
+    private LayoutDocument _logDoc;
     // Доступ из фонового потока сессии (маршрутизация данных) — поэтому ConcurrentDictionary.
     private readonly ConcurrentDictionary<int, ChannelView> _channels = new();
     private readonly DispatcherTimer _statusTimer;
@@ -38,9 +40,13 @@ public partial class MainWindow : Window
     private MuxSession? _session;
     private CancellationTokenSource? _startCts;
     private readonly CollectorPane _collector = new();
-    private readonly LayoutDocument _collectorDoc;
+    private LayoutDocument _collectorDoc;
     private List<CompiledRule> _rules = new();
     private LayoutDocument? _lastActiveDoc;
+    private SessionLogger? _logger;
+    private ConnectParams? _lastConnect;
+    private CancellationTokenSource? _reconnectCts;
+    private string? _reconnectStatus;
     private bool _starting;
     private bool _stopping;
     private bool _closeRequested;
@@ -53,15 +59,130 @@ public partial class MainWindow : Window
         _logPane.SourceName = "System Log";
         _logDoc = CreateDocument("System Log · DLC0", "log", _logPane,
             "Служебный лог: сырые MUX-кадры (HEX), канал управления DLC0, ошибки FCS");
-        _logPane.LayoutCommandRequested += (_, cmd) => ExecuteLayoutCommand(_logDoc, cmd);
+        _logPane.LayoutCommandRequested += OnPaneLayoutCommand;
         _logPane.Collected += OnCollected;
 
         _collectorDoc = CreateDocument("Копилка", "collector", _collector,
             "Все строки, совпавшие с правилами поиска (меню «Настройки», «Отображение и подсветка»)");
         _collector.LayoutCommandRequested += (_, cmd) => ExecuteLayoutCommand(_collectorDoc, cmd);
         _collector.NavigateRequested += NavigateTo;
-        _statusTimer = new DispatcherTimer(TimeSpan.FromMilliseconds(300), DispatcherPriority.Background, (_, _) => UpdateCounters(), Dispatcher);
+        _statusTimer = new DispatcherTimer(TimeSpan.FromMilliseconds(300), DispatcherPriority.Background, (_, _) =>
+        {
+            UpdateCounters();
+            ResetUnreadForVisibleTabs();
+        }, Dispatcher);
         PreviewKeyDown += MainWindow_PreviewKeyDown;
+        RestorePlacement();
+    }
+
+    /// <summary>Документ вкладки ищем по содержимому: после восстановления раскладки объекты LayoutDocument новые.</summary>
+    private void OnPaneLayoutCommand(TerminalPane pane, string command)
+    {
+        if (AllDocuments().FirstOrDefault(d => d.Content == pane) is { } doc)
+            ExecuteLayoutCommand(doc, command);
+    }
+
+    // ───────────────────────────── Положение окна и раскладка ─────────────────────────────
+
+    private void RestorePlacement()
+    {
+        if (_settings.Window is not { Width: > 200, Height: > 200 } w)
+            return;
+        // Окно должно попадать на экран (монитор могли отключить).
+        var screen = new Rect(SystemParameters.VirtualScreenLeft, SystemParameters.VirtualScreenTop,
+            SystemParameters.VirtualScreenWidth, SystemParameters.VirtualScreenHeight);
+        var rect = new Rect(w.Left, w.Top, w.Width, w.Height);
+        if (!screen.IntersectsWith(rect) || rect.Top < screen.Top - 10)
+            return;
+        WindowStartupLocation = WindowStartupLocation.Manual;
+        Left = w.Left;
+        Top = w.Top;
+        Width = Math.Min(w.Width, screen.Width);
+        Height = Math.Min(w.Height, screen.Height);
+        if (w.Maximized)
+            WindowState = WindowState.Maximized;
+    }
+
+    private void SavePlacement()
+    {
+        var bounds = WindowState == WindowState.Normal ? new Rect(Left, Top, Width, Height) : RestoreBounds;
+        if (bounds.IsEmpty)
+            return;
+        _settings.Window = new WindowPlacement
+        {
+            Left = bounds.Left,
+            Top = bounds.Top,
+            Width = bounds.Width,
+            Height = bounds.Height,
+            Maximized = WindowState == WindowState.Maximized,
+        };
+    }
+
+    private void SaveLayout()
+    {
+        try
+        {
+            Directory.CreateDirectory(AppPaths.Root);
+            new AvalonDock.Layout.Serialization.XmlLayoutSerializer(Dock).Serialize(AppPaths.Layout);
+        }
+        catch (Exception ex)
+        {
+            CrashLog.Write(ex, "layout (save)");
+        }
+    }
+
+    /// <summary>
+    /// Восстанавливает раскладку прошлого запуска: вкладки, разделения, отдельные окна.
+    /// Вкладки сопоставляются по ContentId (log, collector, dlcN); новые объекты LayoutDocument
+    /// подставляются вместо наших, вкладки без места в сохранённой раскладке добавляются в основную группу.
+    /// </summary>
+    private bool RestoreLayout()
+    {
+        if (!File.Exists(AppPaths.Layout))
+            return false;
+        var ours = AllDocuments().Where(d => d.ContentId is not null).ToDictionary(d => d.ContentId!, d => d);
+        try
+        {
+            var serializer = new AvalonDock.Layout.Serialization.XmlLayoutSerializer(Dock);
+            serializer.LayoutSerializationCallback += (_, args) =>
+            {
+                if (args.Model.ContentId is { } id && ours.TryGetValue(id, out var doc))
+                    args.Content = doc.Content;
+                else
+                    args.Cancel = true; // канала больше нет в списке
+            };
+            serializer.Deserialize(AppPaths.Layout);
+        }
+        catch (Exception ex)
+        {
+            CrashLog.Write(ex, "layout (restore)");
+            return false;
+        }
+
+        var restored = Dock.Layout.Descendents().OfType<LayoutDocument>()
+            .Concat(Dock.Layout.FloatingWindows.SelectMany(f => f.Descendents().OfType<LayoutDocument>()))
+            .Where(d => d.Content is not null)
+            .Distinct()
+            .ToList();
+        foreach (var doc in restored)
+        {
+            var old = ours.Values.FirstOrDefault(o => o.Content == doc.Content);
+            if (old is null)
+                continue;
+            doc.CanClose = false;
+            doc.CanFloat = true;
+            doc.ToolTip = old.ToolTip;
+            doc.Title = old.Title;
+            if (old == _logDoc)
+                _logDoc = doc;
+            else if (old == _collectorDoc)
+                _collectorDoc = doc;
+            else if (doc.Content is TerminalPane pane && _channels.TryGetValue(pane.Dlci, out var view))
+                _channels[pane.Dlci] = view with { Doc = doc };
+        }
+        foreach (var missing in AllDocuments().Where(d => d.Parent is null).ToList())
+            MainDocumentPane().Children.Add(missing);
+        return true;
     }
 
     // ───────────────────────────── Инициализация ─────────────────────────────
@@ -78,6 +199,12 @@ public partial class MainWindow : Window
         SkipCmuxCheck.IsChecked = _settings.SkipCmux;
         ChannelsBox.Text = _settings.Channels;
 
+        AutoReconnectCheck.IsChecked = _settings.AutoReconnect;
+        SessionLogMenu.IsChecked = _settings.SessionLog;
+        RawFramesLogMenu.IsChecked = _settings.SessionLogRawFrames;
+        RawFramesLogMenu.IsEnabled = _settings.SessionLog;
+        RefreshProfiles(_settings.LastProfile);
+
         var pane = MainDocumentPane();
         pane.Children.Add(_logDoc);
         pane.Children.Add(_collectorDoc);
@@ -85,7 +212,8 @@ public partial class MainWindow : Window
         if (TryParseChannels(_settings.Channels, out var channels, out _))
             foreach (var dlci in channels)
                 EnsureChannel(dlci);
-        (_channels.Values.OrderBy(c => c.Dlci).FirstOrDefault()?.Doc ?? _logDoc).IsSelected = true;
+        if (!RestoreLayout())
+            (_channels.Values.OrderBy(c => c.Dlci).FirstOrDefault()?.Doc ?? _logDoc).IsSelected = true;
 
         _logPane.AppendInfo("Выберите порт (или «Эмулятор модема» для проверки без железа) и нажмите «Старт MUX».");
         _statusTimer.Start();
@@ -127,8 +255,10 @@ public partial class MainWindow : Window
         pane.OpenChannelRequested += p => _ = OpenChannelAsync(p.Dlci);
         pane.CloseChannelRequested += p => _ = CloseChannelAsync(p.Dlci);
         var doc = CreateDocument(ChannelTitle(dlci, ChannelState.Closed), $"dlc{dlci}", pane, $"Логический канал DLC {dlci}");
-        pane.LayoutCommandRequested += (_, cmd) => ExecuteLayoutCommand(doc, cmd);
-        pane.SourceName = ChannelTitle(dlci, ChannelState.Open);
+        pane.LayoutCommandRequested += OnPaneLayoutCommand;
+        pane.RenameRequested += p => RenameChannel(p.Dlci);
+        pane.NewLines += OnPaneNewLines;
+        pane.SourceName = ChannelLabel(dlci);
         pane.Collected += OnCollected;
         pane.ApplyDisplay(_settings.Display, _rules);
         var view = new ChannelView(dlci, doc, pane);
@@ -153,11 +283,48 @@ public partial class MainWindow : Window
     private string ChannelName(int dlci)
         => _settings.ChannelNames.TryGetValue(dlci, out var name) && !string.IsNullOrWhiteSpace(name) ? name : "";
 
-    private string ChannelTitle(int dlci, ChannelState state)
+    /// <summary>«DLC 1 · AT» — имя канала без состояния и счётчиков.</summary>
+    private string ChannelLabel(int dlci)
     {
         string name = ChannelName(dlci);
-        string title = name.Length > 0 ? $"DLC {dlci} · {name}" : $"DLC {dlci}";
-        return state == ChannelState.Open ? title : $"{title} ({StateName(state)})";
+        return name.Length > 0 ? $"DLC {dlci} · {name}" : $"DLC {dlci}";
+    }
+
+    private string ChannelTitle(int dlci, ChannelState state)
+    {
+        string title = ChannelLabel(dlci);
+        if (state != ChannelState.Open)
+            title += $" ({StateName(state)})";
+        if (_unread.TryGetValue(dlci, out int unread) && unread > 0)
+            title += $" [{(unread > 999 ? "999+" : unread.ToString(CultureInfo.InvariantCulture))}]";
+        return title;
+    }
+
+    // ───────────────────────────── Непрочитанное ─────────────────────────────
+
+    private readonly Dictionary<int, int> _unread = new();
+
+    /// <summary>Новые строки на невидимой вкладке — число в квадратных скобках в заголовке.</summary>
+    private void OnPaneNewLines(TerminalPane pane, int count)
+    {
+        if (!_channels.TryGetValue(pane.Dlci, out var view) || view.Doc.IsSelected)
+            return;
+        _unread.TryGetValue(pane.Dlci, out int n);
+        _unread[pane.Dlci] = n + count;
+        view.Doc.Title = ChannelTitle(pane.Dlci, pane.ChannelState);
+    }
+
+    /// <summary>Вкладку открыли — сбрасываем счётчик (проверяется по таймеру статуса).</summary>
+    private void ResetUnreadForVisibleTabs()
+    {
+        foreach (var dlci in _unread.Where(x => x.Value > 0).Select(x => x.Key).ToList())
+        {
+            if (_channels.TryGetValue(dlci, out var view) && view.Doc.IsSelected)
+            {
+                _unread[dlci] = 0;
+                view.Doc.Title = ChannelTitle(dlci, view.Pane.ChannelState);
+            }
+        }
     }
 
     private static string StateName(ChannelState s) => s switch
@@ -372,6 +539,12 @@ public partial class MainWindow : Window
 
     private void MainWindow_PreviewKeyDown(object sender, KeyEventArgs e)
     {
+        if (e.Key == Key.F2 && Keyboard.Modifiers == ModifierKeys.None)
+        {
+            e.Handled = true;
+            RenameActiveChannel();
+            return;
+        }
         if (Keyboard.Modifiers != (ModifierKeys.Control | ModifierKeys.Shift))
             return;
         if (e.Key == Key.S)
@@ -414,74 +587,142 @@ public partial class MainWindow : Window
         return true;
     }
 
-    private async void Start_Click(object sender, RoutedEventArgs e)
-    {
-        if (_session is not null)
-            return;
+    /// <summary>Параметры подключения, прочитанные с формы (для повторного подключения).</summary>
+    private sealed record ConnectParams(
+        string Port, int Baud, bool RtsCts, bool Dtr, string Cmux, bool SkipCmux, List<int> Channels, int? SwitchBaud);
 
+    private bool TryReadConnectParams(out ConnectParams p)
+    {
+        p = null!;
         string port = PortCombo.Text.Trim();
         if (port.Length == 0)
         {
             MessageBox.Show(this, "Выберите COM-порт.", Title, MessageBoxButton.OK, MessageBoxImage.Warning);
-            return;
+            return false;
         }
         if (!int.TryParse(BaudCombo.Text, out int baud) || baud <= 0)
         {
             MessageBox.Show(this, "Некорректная скорость порта.", Title, MessageBoxButton.OK, MessageBoxImage.Warning);
-            return;
+            return false;
         }
         if (!TryParseChannels(ChannelsBox.Text, out var channels, out var error))
         {
             MessageBox.Show(this, error, Title, MessageBoxButton.OK, MessageBoxImage.Warning);
-            return;
+            return false;
         }
         string cmux = CmuxCombo.Text.Trim();
-        if (SkipCmuxCheck.IsChecked != true && CmuxParameters.Parse(cmux).Mode != 0)
+        bool skip = SkipCmuxCheck.IsChecked == true;
+        var cmuxParams = CmuxParameters.Parse(cmux);
+        if (!skip && cmuxParams.Mode != 0)
         {
             MessageBox.Show(this, "Поддерживается только базовый режим: AT+CMUX=0,…", Title, MessageBoxButton.OK, MessageBoxImage.Warning);
-            return;
+            return false;
         }
 
+        // В AT+CMUX указана другая скорость: модем переключится на неё сразу после OK.
+        int? switchBaud = null;
+        if (!skip && port != EmulatorPort && cmuxParams.PortBaudRate is { } newBaud && newBaud != baud)
+        {
+            var answer = MessageBox.Show(this,
+                $"В команде указана скорость порта {newBaud} (параметр port_speed), а порт открывается на {baud}.\n" +
+                $"После ответа OK модем переключится на {newBaud}, и без переключения порта связь пропадёт.\n\n" +
+                $"Да — переключить порт на {newBaud} автоматически после OK\n" +
+                "Нет — не переключать (модем не меняет скорость)\n" +
+                "Отмена — исправить параметры",
+                "Скорость порта", MessageBoxButton.YesNoCancel, MessageBoxImage.Question);
+            if (answer == MessageBoxResult.Cancel)
+                return false;
+            if (answer == MessageBoxResult.Yes)
+                switchBaud = newBaud;
+        }
+
+        p = new ConnectParams(port, baud, RtsCtsCheck.IsChecked == true, DtrCheck.IsChecked == true, cmux, skip, channels, switchBaud);
+        return true;
+    }
+
+    private async void Start_Click(object sender, RoutedEventArgs e)
+    {
+        if (_session is not null || _reconnectCts is not null)
+            return;
+        if (!TryReadConnectParams(out var p))
+            return;
         SaveSettings();
-        foreach (var dlci in channels)
+        await ConnectAsync(p, interactive: true);
+    }
+
+    /// <summary>Открывает порт и запускает MUX. Возвращает true, если сеанс работает.</summary>
+    private async Task<bool> ConnectAsync(ConnectParams p, bool interactive)
+    {
+        foreach (var dlci in p.Channels)
             EnsureChannel(dlci);
 
+        IMuxTransport transport;
         try
         {
-            _transport = port == EmulatorPort
+            transport = p.Port == EmulatorPort
                 ? new EmulatorTransport()
                 : SerialPortTransport.Open(new SerialPortSettings
                 {
-                    PortName = port,
-                    BaudRate = baud,
-                    Handshake = RtsCtsCheck.IsChecked == true ? IOHandshake.RequestToSend : IOHandshake.None,
-                    DtrEnable = DtrCheck.IsChecked == true,
+                    PortName = p.Port,
+                    BaudRate = p.Baud,
+                    Handshake = p.RtsCts ? IOHandshake.RequestToSend : IOHandshake.None,
+                    DtrEnable = p.Dtr,
                 });
         }
         catch (Exception ex)
         {
-            _logPane.AppendInfo($"Не удалось открыть {port}: {ex.Message}", ChunkKind.Error);
-            MessageBox.Show(this, $"Не удалось открыть {port}:\n{ex.Message}", Title, MessageBoxButton.OK, MessageBoxImage.Error);
-            return;
+            _logPane.AppendInfo($"Не удалось открыть {p.Port}: {ex.Message}", ChunkKind.Error);
+            if (interactive)
+                MessageBox.Show(this, $"Не удалось открыть {p.Port}:\n{ex.Message}", Title, MessageBoxButton.OK, MessageBoxImage.Error);
+            return false;
+        }
+        _transport = transport;
+
+        if (_settings.SessionLog)
+        {
+            try
+            {
+                _logger = new SessionLogger(
+                    AppInfo.Diagnostics +
+                    $"Порт: {transport.Name}, RTS/CTS: {p.RtsCts}, DTR: {p.Dtr}\r\n" +
+                    $"Команда: {(p.SkipCmux ? "(модем уже в MUX)" : p.Cmux)}, каналы: {string.Join(",", p.Channels)}",
+                    _settings.SessionLogRawFrames);
+            }
+            catch (Exception ex)
+            {
+                _logPane.AppendInfo("Журнал сеанса не записывается: " + ex.Message, ChunkKind.Error);
+            }
         }
 
-        _logPane.AppendInfo($"==== Подключение: {_transport.Name} ====");
-        var session = new MuxSession(_transport.Stream, new MuxSessionOptions
+        _logPane.AppendInfo($"==== Подключение: {transport.Name} ====");
+        var session = new MuxSession(transport.Stream, new MuxSessionOptions
         {
-            CmuxCommand = cmux,
-            SkipCmuxCommand = SkipCmuxCheck.IsChecked == true,
-            Channels = channels,
+            CmuxCommand = p.Cmux,
+            SkipCmuxCommand = p.SkipCmux,
+            Channels = p.Channels,
+            OnMuxEntered = p.SwitchBaud is { } newBaud && transport is SerialPortTransport serial
+                ? _ =>
+                {
+                    serial.SetBaudRate(newBaud);
+                    _logPane.AppendInfo($"Порт переключён на {newBaud} вслед за модемом");
+                    _logger?.System(LogLevel.Info, $"Порт переключён на {newBaud}");
+                    return Task.CompletedTask;
+                }
+                : null,
         });
         _session = session;
+        _lastConnect = p;
         Wire(session);
         _startCts = new CancellationTokenSource();
         UpdateUi();
 
+        bool ok = false;
         _starting = true;
         try
         {
             await session.StartAsync(_startCts.Token);
-            _logPane.AppendInfo($"MUX запущен. Открыто каналов: {channels.Count(d => session.GetChannelState(d) == ChannelState.Open)} из {channels.Count}");
+            ok = true;
+            _logPane.AppendInfo($"MUX запущен. Открыто каналов: {p.Channels.Count(d => session.GetChannelState(d) == ChannelState.Open)} из {p.Channels.Count}");
         }
         catch (OperationCanceledException)
         {
@@ -490,7 +731,8 @@ public partial class MainWindow : Window
         catch (Exception ex)
         {
             await CleanupAsync(session);
-            MessageBox.Show(this, ex.Message, "Ошибка запуска MUX", MessageBoxButton.OK, MessageBoxImage.Error);
+            if (interactive)
+                MessageBox.Show(this, ex.Message, "Ошибка запуска MUX", MessageBoxButton.OK, MessageBoxImage.Error);
         }
         finally
         {
@@ -498,11 +740,58 @@ public partial class MainWindow : Window
         }
         // Модем мог закрыть сессию прямо во время запуска.
         if (_session is { State: MuxSessionState.Stopped or MuxSessionState.Faulted } ended)
+        {
+            ok = false;
             await CleanupAsync(ended);
+        }
         UpdateUi();
+        return ok;
     }
 
-    private async void Stop_Click(object sender, RoutedEventArgs e) => await StopAsync();
+    /// <summary>Связь потеряна: пытаемся подключиться снова каждые 5 секунд, пока не получится или не нажмут «Стоп».</summary>
+    private async Task ReconnectLoopAsync(ConnectParams p)
+    {
+        if (_reconnectCts is not null)
+            return;
+        var cts = _reconnectCts = new CancellationTokenSource();
+        int attempt = 0;
+        try
+        {
+            while (!cts.IsCancellationRequested)
+            {
+                attempt++;
+                for (int s = 5; s > 0 && !cts.IsCancellationRequested; s--)
+                {
+                    _reconnectStatus = $"Связь потеряна. Переподключение через {s} с (попытка {attempt})…";
+                    UpdateUi();
+                    await Task.Delay(1000);
+                }
+                if (cts.IsCancellationRequested)
+                    break;
+                _reconnectStatus = $"Переподключение (попытка {attempt})…";
+                UpdateUi();
+                _logPane.AppendInfo($"Переподключение, попытка {attempt}");
+                if (await ConnectAsync(p, interactive: false))
+                {
+                    ShowHint($"Связь восстановлена (попытка {attempt})", error: false);
+                    break;
+                }
+            }
+        }
+        finally
+        {
+            _reconnectCts = null;
+            _reconnectStatus = null;
+            cts.Dispose();
+            UpdateUi();
+        }
+    }
+
+    private async void Stop_Click(object sender, RoutedEventArgs e)
+    {
+        _reconnectCts?.Cancel(); // «Стоп» прекращает и попытки переподключения
+        await StopAsync();
+    }
 
     private async Task StopAsync()
     {
@@ -550,7 +839,16 @@ public partial class MainWindow : Window
         }
         foreach (var ch in _channels.Values)
             UpdateChannelUi(ch.Dlci, ChannelState.Closed);
-        _logPane.AppendInfo($"==== Отключено{(session.TerminationReason is { } r ? ": " + r : "")} ====");
+        string reason = session.TerminationReason is { } r ? ": " + r : "";
+        _logPane.AppendInfo($"==== Отключено{reason} ====");
+
+        var logger = _logger;
+        _logger = null;
+        if (logger is not null)
+        {
+            logger.System(LogLevel.Info, "Отключено" + reason);
+            await Task.Run(logger.Dispose);
+        }
         UpdateUi();
     }
 
@@ -589,20 +887,31 @@ public partial class MainWindow : Window
             _ => "",
         };
         _logPane.Append(level == LogLevel.Error ? ChunkKind.Error : ChunkKind.Info, Array.Empty<byte>(), prefix + message);
+        _logger?.System(level, message);
     }
 
     private void OnFrameTraffic(TrafficDirection dir, MuxFrame frame)
-        => _logPane.Append(dir == TrafficDirection.Rx ? ChunkKind.Rx : ChunkKind.Tx, frame.Raw, frame.ToString(),
+    {
+        _logPane.Append(dir == TrafficDirection.Rx ? ChunkKind.Rx : ChunkKind.Tx, frame.Raw, frame.ToString(),
             isDataFrame: frame.Dlci > 0 && frame.Type is FrameType.UIH or FrameType.UI);
+        _logger?.Frame(dir, frame);
+    }
 
     private void OnFrameError(FrameError error)
-        => _logPane.Append(ChunkKind.Error, error.Data, $"{error.Message} ({error.Data.Length} байт): {Hex.Format(error.Data, 48)}");
+    {
+        _logPane.Append(ChunkKind.Error, error.Data, $"{error.Message} ({error.Data.Length} байт): {Hex.Format(error.Data, 48)}");
+        _logger?.FrameError(error);
+    }
 
     private void OnRawTraffic(TrafficDirection dir, byte[] data)
-        => _logPane.Append(dir == TrafficDirection.Rx ? ChunkKind.Rx : ChunkKind.Tx, data, "AT-режим: " + Hex.ToPrintable(data, 256));
+    {
+        _logPane.Append(dir == TrafficDirection.Rx ? ChunkKind.Rx : ChunkKind.Tx, data, "AT-режим: " + Hex.ToPrintable(data, 256));
+        _logger?.Data("AT", dir, data);
+    }
 
     private void OnDataReceived(int dlci, byte[] data)
     {
+        _logger?.Data($"DLC{dlci}", TrafficDirection.Rx, data);
         if (_channels.TryGetValue(dlci, out var view))
             view.Pane.Append(ChunkKind.Rx, data);
         else
@@ -635,6 +944,8 @@ public partial class MainWindow : Window
                 if (state == MuxSessionState.Faulted)
                     ShowHint("Соединение потеряно: " + session.TerminationReason);
                 await CleanupAsync(session);
+                if (state == MuxSessionState.Faulted && AutoReconnectCheck.IsChecked == true && _lastConnect is { } p)
+                    await ReconnectLoopAsync(p);
             }
             UpdateUi();
         });
@@ -652,6 +963,7 @@ public partial class MainWindow : Window
     {
         var session = _session ?? throw new InvalidOperationException("Нет подключения");
         await session.SendDataAsync(dlci, data);
+        _logger?.Data($"DLC{dlci}", TrafficDirection.Tx, data);
     }
 
     private async Task OpenChannelAsync(int dlci)
@@ -704,11 +1016,12 @@ public partial class MainWindow : Window
         bool connected = _session is not null;
         bool running = state == MuxSessionState.Running;
 
-        StartButton.IsEnabled = !connected;
-        StopButton.IsEnabled = connected && !_stopping;
+        bool reconnecting = _reconnectCts is not null;
+        StartButton.IsEnabled = !connected && !reconnecting;
+        StopButton.IsEnabled = (connected && !_stopping) || reconnecting;
         AddChannelButton.IsEnabled = running;
-        foreach (var c in new Control[] { PortCombo, BaudCombo, RtsCtsCheck, DtrCheck, CmuxCombo, SkipCmuxCheck, ChannelsBox })
-            c.IsEnabled = !connected;
+        foreach (var c in new Control[] { PortCombo, BaudCombo, RtsCtsCheck, DtrCheck, CmuxCombo, SkipCmuxCheck, ChannelsBox, ProfileCombo })
+            c.IsEnabled = !connected && !reconnecting;
 
         foreach (var ch in _channels.Values)
             ch.Pane.SetChannelState(ch.Pane.ChannelState, running);
@@ -718,6 +1031,7 @@ public partial class MainWindow : Window
             MuxSessionState.Initializing => ((Brush)Brushes.Gold, "Инициализация MUX…"),
             MuxSessionState.Running => (Brushes.LimeGreen, $"MUX работает · {_transport?.Name} · N1={_session!.MaxFrameSize}"),
             MuxSessionState.Stopping => (Brushes.Gold, "Остановка…"),
+            _ when _reconnectStatus is not null => (Brushes.OrangeRed, _reconnectStatus),
             _ => (Brushes.Gray, "Не подключено"),
         };
         SessionDot.Fill = brush;
@@ -732,10 +1046,10 @@ public partial class MainWindow : Window
             CountersText.Text = $"Кадров RX: {s.RxFrames}  TX: {s.TxFrames}  Ошибок: {s.Errors}";
     }
 
-    private void ShowHint(string text)
+    private void ShowHint(string text, bool error = true)
     {
         HintText.Text = text;
-        HintText.Foreground = Brushes.DarkRed;
+        HintText.Foreground = error ? Brushes.DarkRed : Brushes.DarkGreen;
     }
 
     // ───────────────────────────── Прочее ─────────────────────────────
@@ -750,7 +1064,129 @@ public partial class MainWindow : Window
         _settings.CmuxCommand = CmuxCombo.Text.Trim();
         _settings.SkipCmux = SkipCmuxCheck.IsChecked == true;
         _settings.Channels = ChannelsBox.Text.Trim();
+        _settings.AutoReconnect = AutoReconnectCheck.IsChecked == true;
+        _settings.LastProfile = (ProfileCombo.SelectedItem as ConnectionProfile)?.Name;
         _settings.Save();
+    }
+
+    // ───────────────────────────── Журналы ─────────────────────────────
+
+    private void SessionLogMenu_Click(object sender, RoutedEventArgs e)
+    {
+        _settings.SessionLog = SessionLogMenu.IsChecked;
+        _settings.SessionLogRawFrames = RawFramesLogMenu.IsChecked;
+        RawFramesLogMenu.IsEnabled = SessionLogMenu.IsChecked;
+        _settings.Save();
+        if (_session is not null)
+            ShowHint("Настройка журнала применится со следующего подключения.", error: false);
+    }
+
+    private static void OpenInExplorer(string path)
+    {
+        try
+        {
+            Process.Start(new ProcessStartInfo(path) { UseShellExecute = true });
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show("Не удалось открыть " + path + ":\n" + ex.Message, "Журналы", MessageBoxButton.OK, MessageBoxImage.Warning);
+        }
+    }
+
+    private void OpenLogs_Click(object sender, RoutedEventArgs e)
+    {
+        Directory.CreateDirectory(AppPaths.Logs);
+        OpenInExplorer(AppPaths.Logs);
+    }
+
+    private void OpenCrashLog_Click(object sender, RoutedEventArgs e)
+    {
+        if (File.Exists(AppPaths.CrashLog))
+            OpenInExplorer(AppPaths.CrashLog);
+        else
+            MessageBox.Show(this, "Ошибок не было — журнал ошибок пуст.", Title, MessageBoxButton.OK, MessageBoxImage.Information);
+    }
+
+    // ───────────────────────────── Профили подключения ─────────────────────────────
+
+    private bool _loadingProfile;
+
+    private void RefreshProfiles(string? select)
+    {
+        _loadingProfile = true;
+        ProfileCombo.Items.Clear();
+        foreach (var profile in _settings.Profiles.OrderBy(x => x.Name))
+            ProfileCombo.Items.Add(profile);
+        ProfileCombo.SelectedItem = _settings.Profiles.FirstOrDefault(x => x.Name == select);
+        _loadingProfile = false;
+    }
+
+    private void ProfileCombo_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (_loadingProfile || ProfileCombo.SelectedItem is not ConnectionProfile p)
+            return;
+        PortCombo.Text = p.PortName;
+        BaudCombo.Text = p.BaudRate.ToString(CultureInfo.InvariantCulture);
+        RtsCtsCheck.IsChecked = p.HardwareFlowControl;
+        DtrCheck.IsChecked = p.Dtr;
+        CmuxCombo.Text = p.CmuxCommand;
+        SkipCmuxCheck.IsChecked = p.SkipCmux;
+        ChannelsBox.Text = p.Channels;
+        SaveSettings();
+    }
+
+    private void SaveProfile_Click(object sender, RoutedEventArgs e)
+    {
+        string current = (ProfileCombo.SelectedItem as ConnectionProfile)?.Name ?? "";
+        var name = InputDialog.Ask(this, "Профиль подключения", "Название профиля (например, модель модема):", current);
+        if (string.IsNullOrWhiteSpace(name))
+            return;
+        name = name!.Trim();
+        SaveSettings();
+        _settings.Profiles.RemoveAll(x => x.Name == name);
+        _settings.Profiles.Add(_settings.ToProfile(name));
+        RefreshProfiles(name);
+        SaveSettings();
+        ShowHint($"Профиль «{name}» сохранён", error: false);
+    }
+
+    private void DeleteProfile_Click(object sender, RoutedEventArgs e)
+    {
+        if (ProfileCombo.SelectedItem is not ConnectionProfile p)
+            return;
+        if (MessageBox.Show(this, $"Удалить профиль «{p.Name}»?", Title, MessageBoxButton.YesNo, MessageBoxImage.Question) != MessageBoxResult.Yes)
+            return;
+        _settings.Profiles.Remove(p);
+        RefreshProfiles(null);
+        SaveSettings();
+    }
+
+    // ───────────────────────────── Имена вкладок ─────────────────────────────
+
+    private void RenameTab_Click(object sender, RoutedEventArgs e) => RenameActiveChannel();
+
+    private void RenameActiveChannel()
+    {
+        if (ActiveDocument()?.Content is not TerminalPane { Dlci: > 0 } pane)
+        {
+            MessageBox.Show(this, "Выберите вкладку канала (DLC 1..63).", Title, MessageBoxButton.OK, MessageBoxImage.Information);
+            return;
+        }
+        RenameChannel(pane.Dlci);
+    }
+
+    private void RenameChannel(int dlci)
+    {
+        var name = InputDialog.Ask(this, "Имя вкладки", $"Имя канала DLC {dlci} (пусто — без имени):", ChannelName(dlci));
+        if (name is null)
+            return;
+        _settings.ChannelNames[dlci] = name.Trim();
+        _settings.Save();
+        if (_channels.TryGetValue(dlci, out var view))
+        {
+            view.Pane.SourceName = ChannelLabel(dlci);
+            UpdateChannelUi(dlci, view.Pane.ChannelState);
+        }
     }
 
     private void SaveLog_Click(object sender, RoutedEventArgs e)
@@ -774,9 +1210,14 @@ public partial class MainWindow : Window
 
     private async void Window_Closing(object? sender, CancelEventArgs e)
     {
+        _reconnectCts?.Cancel();
+        SavePlacement();
         SaveSettings();
         if (_session is null)
+        {
+            SaveLayout();
             return;
+        }
         // Сначала корректно закрываем MUX (CLD), чтобы модем вернулся в AT-режим.
         e.Cancel = true;
         if (_closeRequested)
