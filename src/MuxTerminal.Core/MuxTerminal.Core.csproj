@@ -8,7 +8,12 @@
 
   <ItemGroup Condition="'$(TargetFramework)' == 'net48'">
     <Reference Include="System" />
-    <PackageReference Include="System.Memory" Version="4.5.5" />
+    <!-- Последние версии семейства System.Memory: версии сборок согласованы со всеми зависимостями
+         (иначе на настоящем .NET Framework возможен FileLoadException из-за несовпадения версий). -->
+    <PackageReference Include="System.Memory" Version="4.6.3" />
+    <PackageReference Include="System.Buffers" Version="4.6.1" />
+    <PackageReference Include="System.Runtime.CompilerServices.Unsafe" Version="6.1.2" />
+    <PackageReference Include="System.Threading.Tasks.Extensions" Version="4.6.3" />
     <PackageReference Include="System.Threading.Channels" Version="8.0.0" />
     <PackageReference Include="Microsoft.Bcl.AsyncInterfaces" Version="8.0.0" />
     <Using Remove="System.Net.Http" />

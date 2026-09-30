@@ -8,6 +8,13 @@ public partial class App : Application
 {
     protected override void OnStartup(StartupEventArgs e)
     {
+        if (e.Args.Contains("--selftest", StringComparer.OrdinalIgnoreCase))
+        {
+            // Проверка без окна (используется в CI на Windows): код выхода 0 — успех.
+            // В фоновом потоке: ожидание асинхронного кода в UI-потоке WPF привело бы к взаимоблокировке.
+            Environment.Exit(Task.Run(SelfTest.Run).GetAwaiter().GetResult());
+            return;
+        }
         // Все необработанные ошибки — в crash.log: у клиента не будет отладчика, а журнал можно прислать.
         AppDomain.CurrentDomain.UnhandledException += (_, args) =>
         {
