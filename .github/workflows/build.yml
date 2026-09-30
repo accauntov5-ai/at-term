@@ -23,7 +23,7 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: MuxTerminal-net48
+          name: MuxTerminal-exe
           path: |
-            src/MuxTerminal.App/bin/Release/net48/
-            !src/MuxTerminal.App/bin/Release/net48/**/*.pdb
+            src/MuxTerminal.App/bin/Release/net48/MuxTerminal.exe
+            src/MuxTerminal.App/bin/Release/net48/MuxTerminal.exe.config

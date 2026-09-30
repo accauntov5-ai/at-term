@@ -110,7 +110,7 @@ public sealed class OutputColorizer : DocumentColorizingTransformer
         {
             var tf = props.Typeface;
             props.SetTypeface(new Typeface(
-                string.IsNullOrEmpty(fontFamily) ? tf.FontFamily : new FontFamily(fontFamily),
+                !MonoFonts.IsInstalled(fontFamily) ? tf.FontFamily : MonoFonts.Get(fontFamily),
                 italic ? FontStyles.Italic : tf.Style,
                 bold ? FontWeights.Bold : tf.Weight,
                 tf.Stretch));

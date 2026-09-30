@@ -63,6 +63,9 @@ public partial class TerminalPane : UserControl
         TextModeRadio.GroupName = group;
         HexModeRadio.GroupName = group;
 
+        // Шрифт — только установленный (см. MonoFonts): до применения настроек ставим безопасный.
+        Output.FontFamily = MonoFonts.Get(null);
+        Input.FontFamily = Output.FontFamily;
         Output.Document.UndoStack.SizeLimit = 0;
         Output.Options.EnableHyperlinks = false;
         Output.Options.EnableEmailHyperlinks = false;
@@ -128,7 +131,7 @@ public partial class TerminalPane : UserControl
     {
         Display = display;
         Rules = rules;
-        var font = new FontFamily(display.FontFamily);
+        var font = MonoFonts.Get(display.FontFamily);
         Output.FontFamily = font;
         Output.FontSize = display.FontSize;
         Output.Background = Brushes2.Parse(display.Background) ?? Brushes.Black;

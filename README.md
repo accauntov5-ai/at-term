@@ -49,22 +49,31 @@ COM-порту и раскладывает логические каналы (DL
 Приложение собирается под **.NET Framework 4.8** — это последняя версия .NET, которая работает на Windows 7
 (.NET 5–8 на Windows 7 не запускаются).
 
-* Windows 7 SP1 / 8.1: нужно установить .NET Framework 4.8 (офлайн-установщик `ndp48-x86-x64-allos-enu.exe` с сайта Microsoft).
+* Windows 7 SP1 / 8.1: нужно один раз установить .NET Framework 4.8
+  (офлайн-установщик `ndp48-x86-x64-allos-enu.exe` с сайта Microsoft).
 * Windows 10 (1903+) / 11: .NET Framework 4.8 уже есть в системе.
 
-Установка не нужна — достаточно скопировать папку `bin/Release/net48` (exe + несколько dll) и запустить `MuxTerminal.exe`.
-
-## Сборка
-
-Нужен .NET SDK 8 (собирает и net48, и net8.0; на Linux тоже).
+## Сборка для клиента — один файл
 
 ```
-dotnet build MuxTerminal.sln -c Release
-# программа: src/MuxTerminal.App/bin/Release/net48/
+./build-release.sh          # Linux/macOS, нужен .NET SDK 8
+# или на Windows:
+dotnet build src\MuxTerminal.App -c Release
 ```
 
-GitHub Actions (`.github/workflows/build.yml`) на каждый push собирает программу на Windows, прогоняет тесты
-(net8.0 и net48) и выкладывает артефакт `MuxTerminal-net48`.
+Результат — `dist/MuxTerminal.exe` (~1 МБ). Все библиотеки (AvalonDock, AvalonEdit, System.Memory, ядро протокола и т.д.)
+встроены в exe с помощью Costura.Fody. Клиенту передаётся только этот файл: установка не нужна, настройки
+сохраняются в `%AppData%\MuxTerminal\settings.json`.
+Рядом лежит `MuxTerminal.exe.config` — его можно не передавать (он лишь фиксирует версию .NET Framework 4.8).
+
+GitHub Actions (`.github/workflows/build.yml`) на каждый push собирает exe на Windows, прогоняет тесты
+(net8.0 и net48) и выкладывает артефакт `MuxTerminal-exe`.
+
+## Сборка для разработки
+
+```
+dotnet build MuxTerminal.sln            # Debug: src/MuxTerminal.App/bin/Debug/net48/
+```
 
 ## Разработка и проверка на Linux
 
@@ -82,9 +91,9 @@ mono ~/.nuget/packages/xunit.runner.console/2.9.2/tools/net472/xunit.console.exe
 ```
 sudo apt install wine winetricks
 export WINEPREFIX=~/.wine-mux
-winetricks -q dotnet48          # настоящий .NET Framework 4.8 — ближе всего к Windows 7 клиента
-                                # (без него Wine использует встроенный wine-mono — тоже работает)
-wine src/MuxTerminal.App/bin/Debug/net48/MuxTerminal.exe
+winetricks -q dotnet48 corefonts   # настоящий .NET Framework 4.8 + шрифты Windows (Courier New и др.)
+                                   # (без dotnet48 Wine использует встроенный wine-mono — тоже работает)
+wine dist/MuxTerminal.exe
 ```
 
 COM-порт в Wine — это символическая ссылка на устройство Linux (пользователь должен быть в группе `dialout`):
@@ -92,6 +101,10 @@ COM-порт в Wine — это символическая ссылка на у�
 ```
 ln -s /dev/ttyUSB0 ~/.wine-mux/dosdevices/com3    # в программе выбрать COM3
 ```
+
+Строки `fixme:…` в консоли Wine — нормальный шум, на работу не влияют.
+Без шрифтов Windows в префиксе программа сама выбирает любой установленный моноширинный шрифт
+(настоящий WPF падает, если заданный шрифт не найден, — это учтено).
 
 Проверено в Wine 9.0 + wine-mono 8.1: запуск MUX с эмулятором, AT-команды и SMS в каналах, поток NMEA,
 разделение окна, вынос вкладки в отдельное окно и возврат, корректная остановка (DISC + CLD).

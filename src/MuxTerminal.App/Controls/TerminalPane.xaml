@@ -65,7 +65,7 @@
              Независимый скроллбар у каждой вкладки, Ctrl+F — поиск по тексту. -->
         <ae:TextEditor x:Name="Output" Grid.Row="1"
                        IsReadOnly="True" WordWrap="True" ShowLineNumbers="False"
-                       FontFamily="Consolas" FontSize="13" Padding="4"
+                       FontSize="13" Padding="4"
                        VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Auto"
                        Background="#FF1E1E1E" Foreground="#FFDCDCDC" />
 
@@ -84,7 +84,7 @@
                     <Button Style="{StaticResource ToolButton}" Content="Esc" Click="Esc_Click" ToolTip="Отправить 0x1B — отмена ввода SMS" />
                     <Button x:Name="SendButton" Content="Отправить" Padding="12,2" Click="Send_Click" IsDefault="False" />
                 </StackPanel>
-                <TextBox x:Name="Input" FontFamily="Consolas, Cascadia Mono, Courier New" FontSize="13" VerticalContentAlignment="Center"
+                <TextBox x:Name="Input" FontSize="13" VerticalContentAlignment="Center"
                          PreviewKeyDown="Input_PreviewKeyDown" ToolTip="Enter — отправить, стрелки вверх/вниз — история команд, Ctrl+Z — отправить текст и 0x1A (SMS)" />
             </DockPanel>
         </Border>

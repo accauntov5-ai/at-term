@@ -157,7 +157,7 @@
                                 </DataGridTemplateColumn.CellTemplate>
                             </DataGridTemplateColumn>
                             <DataGridTextColumn Header="Название" Binding="{Binding Name}" Width="150" />
-                            <DataGridTextColumn Header="Шаблон" Binding="{Binding Pattern}" Width="*" FontFamily="Consolas" />
+                            <DataGridTextColumn Header="Шаблон" Binding="{Binding Pattern}" Width="*" />
                             <DataGridTemplateColumn Header="Regex" Width="50">
                                 <DataGridTemplateColumn.CellTemplate>
                                     <DataTemplate>

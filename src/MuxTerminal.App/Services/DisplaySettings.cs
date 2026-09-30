@@ -230,42 +230,89 @@ public static class Brushes2
     public static string ToHex(Color c) => $"#{c.R:X2}{c.G:X2}{c.B:X2}";
 }
 
-/// <summary>Список моноширинных шрифтов системы (терминал всегда моноширинный).</summary>
+/// <summary>
+/// Моноширинные шрифты, реально установленные в системе. Используем только их: настоящий WPF (.NET Framework)
+/// аварийно завершает процесс (FailFast в FontFamily.FirstFontFamily), если ни одно имя из FontFamily не найдено, —
+/// так бывает в Wine без шрифтов Windows.
+/// </summary>
 public static class MonoFonts
 {
     private static readonly string[] Preferred = { "Consolas", "Cascadia Mono", "Lucida Console", "Courier New", "DejaVu Sans Mono", "Liberation Mono" };
-    private static List<string>? _cache;
+    private static readonly Dictionary<string, FontFamily> Families = new(StringComparer.OrdinalIgnoreCase);
+    private static List<string>? _mono;
+    private static HashSet<string>? _installed;
 
-    public static IReadOnlyList<string> All()
+    private static void Scan()
     {
-        if (_cache is not null)
-            return _cache;
-        var result = new List<string>();
+        if (_mono is not null)
+            return;
+        var mono = new List<string>();
+        _installed = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         foreach (var family in Fonts.SystemFontFamilies)
         {
             try
             {
-                if (IsMonospace(family))
-                    result.Add(family.Source);
+                var typeface = new Typeface(family, FontStyles.Normal, FontWeights.Normal, FontStretches.Normal);
+                if (!typeface.TryGetGlyphTypeface(out var glyph))
+                    continue;
+                _installed.Add(family.Source);
+                Families[family.Source] = family;
+                if (IsMonospace(glyph))
+                    mono.Add(family.Source);
             }
             catch
             {
                 // Битый шрифт — пропускаем.
             }
         }
-        // Стандартные моноширинные шрифты Windows показываем всегда (в Wine их может не быть в списке).
-        foreach (var name in Preferred.Reverse())
-            if (!result.Contains(name, StringComparer.OrdinalIgnoreCase))
-                result.Insert(0, name);
-        _cache = result.Distinct(StringComparer.OrdinalIgnoreCase).OrderBy(n => Array.IndexOf(Preferred, n) is var i && i >= 0 ? i : 100).ThenBy(n => n).ToList();
-        return _cache;
+        _mono = mono.Distinct(StringComparer.OrdinalIgnoreCase)
+            .OrderBy(n => Array.IndexOf(Preferred, n) is var i && i >= 0 ? i : 100)
+            .ThenBy(n => n)
+            .ToList();
     }
 
-    private static bool IsMonospace(FontFamily family)
+    /// <summary>Установленные моноширинные шрифты (для выбора в настройках).</summary>
+    public static IReadOnlyList<string> All()
     {
-        var typeface = new Typeface(family, FontStyles.Normal, FontWeights.Normal, FontStretches.Normal);
-        if (!typeface.TryGetGlyphTypeface(out var glyph))
-            return false;
+        Scan();
+        return _mono!.Count > 0 ? _mono : new List<string> { Resolve(null) };
+    }
+
+    public static bool IsInstalled(string? name)
+    {
+        Scan();
+        return !string.IsNullOrWhiteSpace(name) && _installed!.Contains(name!);
+    }
+
+    /// <summary>
+    /// Имя установленного шрифта: нужный, если он есть; иначе первый установленный моноширинный;
+    /// иначе системный шрифт интерфейса (лучше не моноширинный, чем падение программы).
+    /// </summary>
+    public static string Resolve(string? wanted)
+    {
+        Scan();
+        if (IsInstalled(wanted))
+            return wanted!;
+        if (_mono!.Count > 0)
+            return _mono[0];
+        var ui = SystemFonts.MessageFontFamily.Source;
+        return IsInstalled(ui) ? ui : _installed!.FirstOrDefault() ?? ui;
+    }
+
+    /// <summary>Объект шрифта для установленного имени (с кэшем).</summary>
+    public static FontFamily Get(string? wanted)
+    {
+        string name = Resolve(wanted);
+        lock (Families)
+        {
+            if (!Families.TryGetValue(name, out var family))
+                Families[name] = family = new FontFamily(name);
+            return family;
+        }
+    }
+
+    private static bool IsMonospace(GlyphTypeface glyph)
+    {
         double? width = null;
         foreach (char ch in "iW.m0")
         {

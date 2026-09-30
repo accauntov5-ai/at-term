@@ -51,7 +51,7 @@ public partial class CollectorPane : UserControl
     {
         List.Background = Brushes2.Parse(display.Background) ?? Brushes.Black;
         List.Foreground = Brushes2.Parse(display.Foreground) ?? Brushes.Gainsboro;
-        List.FontFamily = new FontFamily(display.FontFamily);
+        List.FontFamily = MonoFonts.Get(display.FontFamily);
         List.FontSize = display.FontSize;
         SetRuleNames(display.Rules.Where(r => r.Collect).Select(r => r.Name));
     }

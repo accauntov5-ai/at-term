@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Costura встраивает все зависимые DLL (AvalonDock, AvalonEdit, System.Memory, MuxTerminal.Core …) в MuxTerminal.exe:
+     клиенту передаётся один файл. -->
+<Weavers xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="FodyWeavers.xsd">
+  <Costura IncludeDebugSymbols="false" />
+</Weavers>
