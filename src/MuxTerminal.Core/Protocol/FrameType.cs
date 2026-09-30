@@ -21,7 +21,13 @@ public static class FrameConstants
 {
     public const byte Flag = 0xF9;
     public const byte PollFinalBit = 0x10;
-    public const int MaxDlci = 63;
+    /// <summary>
+    /// Максимальный номер канала данных. DLCI 62 и 63 зарезервированы стандартом (27.010, п. 5.6):
+    /// адрес DLCI 62 с C/R=0 равен 0xF9 — совпадает с флагом и разрушил бы разбор потока.
+    /// </summary>
+    public const int MaxDlci = 61;
+    /// <summary>Максимум, помещающийся в поле адреса (при приёме принимаем любой).</summary>
+    public const int MaxAddressDlci = 63;
     /// <summary>Максимальная длина, кодируемая двухбайтовым полем Length (15 бит).</summary>
     public const int MaxLength = 0x7FFF;
     /// <summary>N1 по умолчанию для Basic Option.</summary>

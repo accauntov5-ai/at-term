@@ -7,7 +7,7 @@ public sealed class MuxFrame
 {
     public MuxFrame(int dlci, FrameType type, bool commandResponse, bool pollFinal, byte[] payload, byte[]? raw = null)
     {
-        if (dlci is < 0 or > FrameConstants.MaxDlci)
+        if (dlci is < 0 or > FrameConstants.MaxAddressDlci)
             throw new ArgumentOutOfRangeException(nameof(dlci), "DLCI должен быть в диапазоне 0..63");
         Dlci = dlci;
         Type = type;

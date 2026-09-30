@@ -50,7 +50,7 @@
                               ToolTip="Показывать отправленные данные (если эхо модема выключено, ATE0)" />
                     <CheckBox x:Name="DataFramesCheck" Content="Кадры данных" IsChecked="True" Visibility="Collapsed"
                               Checked="ViewMode_Changed" Unchecked="ViewMode_Changed"
-                              ToolTip="Показывать UIH-кадры каналов 1..63. Снимите, чтобы видеть только служебный обмен (SABM/UA/DISC, DLC0, ошибки)" />
+                              ToolTip="Показывать UIH-кадры каналов 1..61. Снимите, чтобы видеть только служебный обмен (SABM/UA/DISC, DLC0, ошибки)" />
                     <CheckBox x:Name="WrapCheck" Content="Перенос" IsChecked="True" Checked="Wrap_Changed" Unchecked="Wrap_Changed" />
                 </StackPanel>
                 <StackPanel Orientation="Horizontal">

@@ -80,7 +80,7 @@
                     <CheckBox x:Name="SkipCmuxCheck" Content="Модем уже в MUX" VerticalAlignment="Center" Margin="8,0,0,0"
                               ToolTip="Не отправлять AT+CMUX, сразу открывать DLC0" />
                     <TextBlock Style="{StaticResource Label}" Text="Каналы:" />
-                    <TextBox x:Name="ChannelsBox" Width="70" VerticalContentAlignment="Center" ToolTip="Номера DLC через запятую (1..63)" />
+                    <TextBox x:Name="ChannelsBox" Width="70" VerticalContentAlignment="Center" ToolTip="Номера DLC через запятую (1..61)" />
                 </StackPanel>
                 <StackPanel Orientation="Horizontal" Margin="8,2,0,2">
                     <Button x:Name="StartButton" Content="Старт MUX" Padding="12,3" Click="Start_Click" FontWeight="SemiBold" />

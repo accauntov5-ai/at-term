@@ -31,6 +31,10 @@ public sealed class ModemEmulator : IAsyncDisposable
     private readonly ConcurrentDictionary<int, ChannelContext> _open = new();
     private readonly ChannelContext _atContext = new();
     private readonly List<MuxFrame> _received = new();
+    private readonly List<MuxFrame> _log = new();
+    private readonly HashSet<int> _mscReceived = new();
+    private readonly Random _rng;
+    private bool _lastWriteEndedWithFlag;
     private Task? _loop;
     private Task? _nmeaLoop;
     private volatile bool _mux;
@@ -38,9 +42,12 @@ public sealed class ModemEmulator : IAsyncDisposable
     private int _smsCounter;
     private long _framesReceived, _frameErrors;
 
-    public ModemEmulator(Stream stream)
+    public ModemEmulator(Stream stream, ModemQuirks? quirks = null)
     {
         _stream = stream;
+        Quirks = quirks ?? new ModemQuirks();
+        _rng = new Random(Quirks.Seed);
+        _atContext.Echo = Quirks.Echo;
         _parser.FrameReceived += OnFrame;
         _parser.Error += _ => Interlocked.Increment(ref _frameErrors);
     }
@@ -49,7 +56,23 @@ public sealed class ModemEmulator : IAsyncDisposable
     public int NmeaDlci { get; set; } = 3;
     public TimeSpan NmeaInterval { get; set; } = TimeSpan.FromSeconds(1);
 
+    public ModemQuirks Quirks { get; }
     public bool InMuxMode => _mux;
+
+    /// <summary>Все кадры, полученные от терминала (для проверок в тестах).</summary>
+    public IReadOnlyList<MuxFrame> ReceivedFrames
+    {
+        get
+        {
+            lock (_log)
+                return _log.ToArray();
+        }
+    }
+
+    /// <summary>Управляющие сообщения DLC0, полученные от терминала.</summary>
+    public IReadOnlyList<ControlMessage> ReceivedControl
+        => ReceivedFrames.Where(f => f.Dlci == 0 && f.Type is FrameType.UIH or FrameType.UI)
+            .SelectMany(f => ControlMessage.ParseAll(f.Payload)).ToList();
     public int N1 => _n1;
     public long FramesReceived => Interlocked.Read(ref _framesReceived);
     public long FrameErrors => Interlocked.Read(ref _frameErrors);
@@ -133,15 +156,30 @@ public sealed class ModemEmulator : IAsyncDisposable
                 await WriteRawAsync(Encoding.ASCII.GetBytes("\r\nERROR\r\n"));
                 return;
             }
-            await WriteRawAsync(Encoding.ASCII.GetBytes("\r\nOK\r\n"));
+            if (Quirks.CmuxResponse != "OK")
+            {
+                await WriteRawAsync(Encoding.ASCII.GetBytes(Fix("\r\n" + Quirks.CmuxResponse + "\r\n")));
+                return;
+            }
+            var reply = new List<byte>();
+            if (Quirks.UrcBeforeCmuxOk is { } urc)
+                reply.AddRange(Encoding.ASCII.GetBytes(Fix("\r\n" + urc + "\r\n")));
+            reply.AddRange(Encoding.ASCII.GetBytes(Fix("\r\nOK\r\n")));
             _n1 = p.N1;
             _parser.Reset();
-            _parser.MaxPayloadLength = Math.Max(_n1, 127);
+            _parser.MaxPayloadLength = Math.Max(Math.Max(_n1, Quirks.ForceN1 ?? 0), 127);
             _mux = true;
+            if (Quirks.FrameRightAfterOk)
+            {
+                var test = new ControlMessage(ControlMessageType.Test, true, Encoding.ASCII.GetBytes("EMU"));
+                reply.AddRange(FrameEncoder.Encode(0, FrameType.UIH, false, false, test.Encode()));
+            }
+            await WriteRawAsync(reply.ToArray());
+            _lastWriteEndedWithFlag = Quirks.FrameRightAfterOk;
             return;
         }
         var response = Execute(line, _atContext);
-        await WriteRawAsync(Encoding.ASCII.GetBytes(response));
+        await WriteRawAsync(Encoding.ASCII.GetBytes(Fix(response)));
     }
 
     // ───────────── MUX ─────────────
@@ -149,6 +187,8 @@ public sealed class ModemEmulator : IAsyncDisposable
     private void OnFrame(MuxFrame frame)
     {
         Interlocked.Increment(ref _framesReceived);
+        lock (_log)
+            _log.Add(frame);
         _received.Add(frame); // обрабатываем после Feed, асинхронно и по порядку
     }
 
@@ -157,9 +197,16 @@ public sealed class ModemEmulator : IAsyncDisposable
         switch (frame.Type)
         {
             case FrameType.SABM:
-                _open.TryAdd(frame.Dlci, new ChannelContext());
+                if (Quirks.IgnoreSabm.Contains(frame.Dlci))
+                    break;
+                if (frame.Dlci > Quirks.MaxDlci)
+                {
+                    await SendFrameAsync(frame.Dlci, FrameType.DM, true, true, default);
+                    break;
+                }
+                _open.TryAdd(frame.Dlci, new ChannelContext { Echo = Quirks.Echo });
                 await SendFrameAsync(frame.Dlci, FrameType.UA, true, true, default);
-                if (frame.Dlci > 0)
+                if (frame.Dlci > 0 && Quirks.SendMscOnOpen)
                 {
                     // Как и реальные модемы, сообщаем состояние V.24-сигналов канала.
                     var msc = ControlMessage.Msc(frame.Dlci, ModemSignals.RTC | ModemSignals.RTR | ModemSignals.DV);
@@ -168,14 +215,17 @@ public sealed class ModemEmulator : IAsyncDisposable
                 break;
 
             case FrameType.DISC:
-                await SendFrameAsync(frame.Dlci, FrameType.UA, true, true, default);
+                // Состояние меняем до ответа: получив UA, терминал вправе считать модем уже в AT-режиме.
                 _open.TryRemove(frame.Dlci, out _);
                 if (frame.Dlci == 0)
                     LeaveMux();
+                await SendFrameAsync(frame.Dlci, FrameType.UA, true, true, default);
                 break;
 
             case FrameType.UIH:
             case FrameType.UI:
+                if (frame.Dlci == 0 && !_open.ContainsKey(0))
+                    break; // DLC0 ещё не открыт (ответ на кадр, посланный сразу за OK) — только фиксируем
                 if (!_open.TryGetValue(frame.Dlci, out var ctx))
                 {
                     await SendFrameAsync(frame.Dlci, FrameType.DM, true, true, default);
@@ -197,11 +247,20 @@ public sealed class ModemEmulator : IAsyncDisposable
                 continue;
             switch (msg.Type)
             {
-                case ControlMessageType.CLD:
-                    await SendFrameAsync(0, FrameType.UIH, false, false, msg.ToResponse().Encode());
-                    LeaveMux();
-                    return;
+                case ControlMessageType.CLD when !Quirks.SupportsCld:
+                    await SendFrameAsync(0, FrameType.UIH, false, false,
+                        new ControlMessage(ControlMessageType.NSC, false, new[] { msg.TypeOctet }).Encode());
+                    break;
                 case ControlMessageType.MSC:
+                    if (msg.Value.Length >= 1)
+                        lock (_mscReceived)
+                            _mscReceived.Add(msg.Value[0] >> 2);
+                    await SendFrameAsync(0, FrameType.UIH, false, false, msg.ToResponse().Encode());
+                    break;
+                case ControlMessageType.CLD:
+                    LeaveMux(); // до ответа — см. DISC
+                    await SendFrameAsync(0, FrameType.UIH, false, false, msg.ToResponse().Encode());
+                    return;
                 case ControlMessageType.Test:
                 case ControlMessageType.PN:
                 case ControlMessageType.FCon:
@@ -218,6 +277,12 @@ public sealed class ModemEmulator : IAsyncDisposable
 
     private async Task HandleDataAsync(int dlci, ChannelContext ctx, byte[] data)
     {
+        if (Quirks.RequireMscBeforeData)
+        {
+            lock (_mscReceived)
+                if (!_mscReceived.Contains(dlci))
+                    return; // модем молчит, пока терминал не прислал MSC для канала
+        }
         foreach (byte b in data)
         {
             if (ctx.SmsInput)
@@ -285,7 +350,30 @@ public sealed class ModemEmulator : IAsyncDisposable
         _mux = false;
         _open.Clear();
         _parser.Reset();
+        lock (_mscReceived)
+            _mscReceived.Clear();
     }
+
+    private string Fix(string text) => Quirks.LineEnding == "\r\n" ? text : text.Replace("\r\n", Quirks.LineEnding);
+
+    // ───────────── Команды «от модема» (для тестов) ─────────────
+
+    /// <summary>Отправить терминалу управляющее сообщение по DLC0 (модем — отвечающая сторона, C/R=0).</summary>
+    public Task SendControlAsync(ControlMessage message)
+        => SendFrameAsync(0, FrameType.UIH, false, false, message.Encode());
+
+    /// <summary>Отправить терминалу произвольный кадр (SABM/DISC/UIH от модема и т.п.).</summary>
+    public Task SendFrameToTerminalAsync(int dlci, FrameType type, bool commandResponse, bool pollFinal, byte[] payload)
+    {
+        if (type == FrameType.SABM)
+            _open.TryAdd(dlci, new ChannelContext { Echo = Quirks.Echo });
+        if (type == FrameType.DISC)
+            _open.TryRemove(dlci, out _);
+        return SendFrameAsync(dlci, type, commandResponse, pollFinal, payload);
+    }
+
+    /// <summary>Отправить данные в канал от имени модема.</summary>
+    public Task SendToChannelAsync(int dlci, byte[] data) => SendDataAsync(dlci, data);
 
     // ───────────── AT-команды ─────────────
 
@@ -386,22 +474,56 @@ public sealed class ModemEmulator : IAsyncDisposable
     {
         if (!_mux)
             return;
-        for (int offset = 0; offset < data.Length; offset += _n1)
+        int n1 = Quirks.ForceN1 ?? _n1;
+        var type = Quirks.DataFramesAsUi ? FrameType.UI : FrameType.UIH;
+        for (int offset = 0; offset < data.Length; offset += n1)
         {
-            int len = Math.Min(_n1, data.Length - offset);
-            await SendFrameAsync(dlci, FrameType.UIH, false, false, data.AsMemory(offset, len));
+            int len = Math.Min(n1, data.Length - offset);
+            await SendFrameAsync(dlci, type, Quirks.DataCrBit, false, data.AsMemory(offset, len));
         }
     }
 
     private Task SendFrameAsync(int dlci, FrameType type, bool cr, bool pf, ReadOnlyMemory<byte> payload)
-        => WriteRawAsync(FrameEncoder.Encode(dlci, type, cr, pf, payload.Span));
+        => WriteRawAsync(FrameEncoder.Encode(dlci, type, cr, pf, payload.Span), isFrame: true);
 
-    private async Task WriteRawAsync(byte[] data)
+    private async Task WriteRawAsync(byte[] data, bool isFrame = false)
     {
         await _writeLock.WaitAsync(_cts.Token);
         try
         {
-            await _stream.WriteAsync(data, 0, data.Length, _cts.Token);
+            var bytes = new List<byte>(data.Length + 16);
+            if (isFrame)
+            {
+                if (Quirks.NoiseProbability > 0 && _rng.NextDouble() < Quirks.NoiseProbability)
+                    for (int i = _rng.Next(1, 12); i > 0; i--)
+                        bytes.Add((byte)(_rng.Next(0, 0xF8))); // мусор без 0xF9
+                for (int i = 0; i < Quirks.ExtraFlags; i++)
+                    bytes.Add(FrameConstants.Flag);
+                // Общий флаг: открывающий флаг опускаем, если предыдущий кадр закончился флагом.
+                bool skipOpening = Quirks.SharedFlags && _lastWriteEndedWithFlag && bytes.Count == 0;
+                bytes.AddRange(skipOpening ? data.Skip(1) : data);
+                _lastWriteEndedWithFlag = true;
+            }
+            else
+            {
+                bytes.AddRange(data);
+                _lastWriteEndedWithFlag = false;
+            }
+
+            var all = bytes.ToArray();
+            if (Quirks.MaxChunk <= 0)
+            {
+                await _stream.WriteAsync(all, 0, all.Length, _cts.Token);
+            }
+            else
+            {
+                for (int offset = 0; offset < all.Length;)
+                {
+                    int len = Math.Min(all.Length - offset, _rng.Next(1, Quirks.MaxChunk + 1));
+                    await _stream.WriteAsync(all, offset, len, _cts.Token);
+                    offset += len;
+                }
+            }
             await _stream.FlushAsync(_cts.Token);
         }
         finally
@@ -429,11 +551,11 @@ public sealed class EmulatorTransport : IMuxTransport
 {
     private readonly InMemoryDuplexStream _client;
 
-    public EmulatorTransport()
+    public EmulatorTransport(ModemQuirks? quirks = null)
     {
         var (client, modem) = InMemoryDuplexStream.CreatePair();
         _client = client;
-        Emulator = new ModemEmulator(modem);
+        Emulator = new ModemEmulator(modem, quirks);
         Emulator.Start();
     }
 

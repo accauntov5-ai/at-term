@@ -578,7 +578,7 @@ public partial class MainWindow : Window
         {
             if (!int.TryParse(part, out int dlci) || dlci is < 1 or > FrameConstants.MaxDlci)
             {
-                error = $"Некорректный номер канала «{part}». Допустимо 1..63.";
+                error = $"Некорректный номер канала «{part}». Допустимо 1..61 (62 и 63 зарезервированы стандартом).";
                 return false;
             }
             if (!channels.Contains(dlci))
@@ -1000,7 +1000,7 @@ public partial class MainWindow : Window
     {
         if (!int.TryParse(ExtraDlcBox.Text, out int dlci) || dlci is < 1 or > FrameConstants.MaxDlci)
         {
-            MessageBox.Show(this, "Номер канала: 1..63", Title, MessageBoxButton.OK, MessageBoxImage.Warning);
+            MessageBox.Show(this, "Номер канала: 1..61", Title, MessageBoxButton.OK, MessageBoxImage.Warning);
             return;
         }
         var view = EnsureChannel(dlci);
@@ -1169,7 +1169,7 @@ public partial class MainWindow : Window
     {
         if (ActiveDocument()?.Content is not TerminalPane { Dlci: > 0 } pane)
         {
-            MessageBox.Show(this, "Выберите вкладку канала (DLC 1..63).", Title, MessageBoxButton.OK, MessageBoxImage.Information);
+            MessageBox.Show(this, "Выберите вкладку канала (DLC 1..61).", Title, MessageBoxButton.OK, MessageBoxImage.Information);
             return;
         }
         RenameChannel(pane.Dlci);

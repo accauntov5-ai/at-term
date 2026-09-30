@@ -53,6 +53,8 @@ public sealed class MuxSession : IAsyncDisposable
 
     private Task? _readTask;
     private volatile bool _muxMode;
+    /// <summary>OK пришёл с «\r», а «\n» ещё в пути — первый байт MUX-потока может быть этим «\n».</summary>
+    private bool _swallowLf;
     private volatile bool _globalFlowOff;
     private TaskCompletionSource<AtResponse>? _atTcs;
     private bool _switchToMuxOnOk;
@@ -245,7 +247,7 @@ public sealed class MuxSession : IAsyncDisposable
     public async Task<bool> OpenChannelAsync(int dlci, CancellationToken ct = default)
     {
         if (dlci is < 1 or > FrameConstants.MaxDlci)
-            throw new ArgumentOutOfRangeException(nameof(dlci), "Каналы данных: 1..63");
+            throw new ArgumentOutOfRangeException(nameof(dlci), "Каналы данных: 1..61");
         if (!await OpenChannelCoreAsync(dlci, ct))
             return false;
         if (_options.SendMscOnOpen)
@@ -434,6 +436,12 @@ public sealed class MuxSession : IAsyncDisposable
     {
         if (_muxMode)
         {
+            if (_swallowLf)
+            {
+                _swallowLf = false;
+                if (data.Length > 0 && data[0] == (byte)'\n')
+                    data = data.Slice(1);
+            }
             _parser.Feed(data);
             return;
         }
@@ -455,12 +463,16 @@ public sealed class MuxSession : IAsyncDisposable
                 if (_atTcs is { } tcs && TryFindFinalResult(_atBuffer, out var result, out int end))
                 {
                     var text = Compat.Latin1.GetString(_atBuffer.GetRange(0, end).ToArray());
+                    bool endsWithBareCr = _atBuffer[end - 1] == (byte)'\r' && end == _atBuffer.Count;
                     if (end < _atBuffer.Count)
                         leftover = _atBuffer.GetRange(end, _atBuffer.Count - end).ToArray();
                     _atBuffer.Clear();
                     _atTcs = null;
                     if (result == "OK" && _switchToMuxOnOk)
+                    {
                         _muxMode = true; // всё, что пришло после OK, — уже кадры
+                        _swallowLf = endsWithBareCr;
+                    }
                     else
                         leftover = null;
                     tcs.TrySetResult(new AtResponse(result, text, false));

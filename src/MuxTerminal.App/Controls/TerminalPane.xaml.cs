@@ -24,7 +24,7 @@ public enum ChunkKind
 }
 
 /// <summary>Порция данных в истории вкладки. Храним байты, чтобы перерисовывать Текст ↔ HEX без потерь.</summary>
-/// <param name="IsDataFrame">Кадр данных канала 1..63 в системном логе — может скрываться фильтром.</param>
+/// <param name="IsDataFrame">Кадр данных канала 1..61 в системном логе — может скрываться фильтром.</param>
 public sealed record TerminalChunk(DateTime Time, ChunkKind Kind, byte[] Data, string? Text = null, bool IsDataFrame = false);
 
 /// <summary>Строка, попавшая в «Копилку» по правилу поиска.</summary>

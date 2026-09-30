@@ -75,79 +75,44 @@ public sealed class FrameParser
                 start++;
             pos = start;
 
-            // Минимум: F9 Addr Ctrl Len
-            if (_count - start < 4)
-                break;
-
-            int i = start + 1;
-            byte address = _buffer[i++];
-            byte control = _buffer[i++];
-            byte len1 = _buffer[i++];
-
-            if ((address & 0x01) == 0 || !TryGetFrameType(control, out var type))
+            var r = TryParseAt(start);
+            switch (r.Status)
             {
-                Report(FrameErrorKind.BadHeader, start, 1, $"Некорректный заголовок: addr=0x{address:X2} ctrl=0x{control:X2}");
-                pos = start + 1;
-                continue;
+                case ParseStatus.Incomplete:
+                    // Ждём хвост кадра. Но если «начало» было ложным (мусор похож на заголовок с большой длиной),
+                    // ждать можно бесконечно, а настоящие кадры застрянут в буфере. Поэтому, если дальше
+                    // уже лежит целый корректный кадр (FCS и закрывающий флаг сошлись) — считаем начало ложным.
+                    int next = FindCompleteFrameAfter(start + 1);
+                    if (next < 0)
+                        goto done;
+                    Report(FrameErrorKind.BadHeader, start, next - start, "Ложное начало кадра: дальше найден целый кадр");
+                    pos = next;
+                    continue;
+
+                case ParseStatus.BadHeader:
+                    Report(FrameErrorKind.BadHeader, start, 1, r.Message!);
+                    pos = start + 1;
+                    continue;
+
+                case ParseStatus.MissingClosingFlag:
+                    Report(FrameErrorKind.MissingClosingFlag, start, 1, "Нет закрывающего флага 0xF9");
+                    pos = start + 1;
+                    continue;
+
+                case ParseStatus.BadFcs:
+                    Report(FrameErrorKind.BadFcs, start, r.CloseIndex - start + 1, "Ошибка FCS, кадр отброшен");
+                    // Продолжаем поиск со следующего байта, а не с «закрывающего» флага: заголовок мог быть ложным
+                    // (мусор, потерянный байт), и тогда между ним и найденным 0xF9 лежат настоящие кадры.
+                    pos = start + 1;
+                    continue;
+
+                default:
+                    pos = r.CloseIndex; // закрывающий флаг может быть открывающим для следующего кадра
+                    FrameReceived?.Invoke(r.Frame!);
+                    continue;
             }
-
-            int length;
-            if ((len1 & 0x01) != 0)
-            {
-                length = len1 >> 1;
-            }
-            else
-            {
-                if (_count - start < 5)
-                    break;
-                byte len2 = _buffer[i++];
-                length = (len1 >> 1) | (len2 << 7);
-            }
-
-            if (length > MaxPayloadLength)
-            {
-                Report(FrameErrorKind.BadHeader, start, 1, $"Длина {length} превышает максимум {MaxPayloadLength}");
-                pos = start + 1;
-                continue;
-            }
-
-            int headerEnd = i;
-            int fcsIndex = headerEnd + length;
-            int closeIndex = fcsIndex + 1;
-            if (closeIndex >= _count)
-                break; // кадр ещё не принят целиком
-
-            if (_buffer[closeIndex] != FrameConstants.Flag)
-            {
-                Report(FrameErrorKind.MissingClosingFlag, start, 1, "Нет закрывающего флага 0xF9");
-                pos = start + 1;
-                continue;
-            }
-
-            var header = _buffer.AsSpan(start + 1, headerEnd - start - 1);
-            var payload = _buffer.AsSpan(headerEnd, length);
-            bool fcsOk = type == FrameType.UIH
-                ? Fcs.Check(header, ReadOnlySpan<byte>.Empty, _buffer[fcsIndex])
-                : Fcs.Check(header, payload, _buffer[fcsIndex]);
-
-            if (!fcsOk)
-            {
-                Report(FrameErrorKind.BadFcs, start, closeIndex - start + 1, "Ошибка FCS, кадр отброшен");
-                pos = closeIndex; // закрывающий флаг может быть открывающим для следующего кадра
-                continue;
-            }
-
-            var raw = _buffer.AsSpan(start, closeIndex - start + 1).ToArray();
-            var frame = new MuxFrame(
-                address >> 2,
-                type,
-                (address & 0x02) != 0,
-                (control & FrameConstants.PollFinalBit) != 0,
-                payload.ToArray(),
-                raw);
-            pos = closeIndex;
-            FrameReceived?.Invoke(frame);
         }
+        done:
 
         // Сдвигаем необработанный хвост в начало буфера.
         if (pos > 0)
@@ -157,6 +122,103 @@ public sealed class FrameParser
                 Buffer.BlockCopy(_buffer, pos, _buffer, 0, remaining);
             _count = remaining;
         }
+    }
+
+    private enum ParseStatus
+    {
+        Incomplete,
+        BadHeader,
+        MissingClosingFlag,
+        BadFcs,
+        Ok,
+    }
+
+    private readonly struct ParseResult
+    {
+        public ParseResult(ParseStatus status, int closeIndex = 0, MuxFrame? frame = null, string? message = null)
+        {
+            Status = status;
+            CloseIndex = closeIndex;
+            Frame = frame;
+            Message = message;
+        }
+
+        public ParseStatus Status { get; }
+        public int CloseIndex { get; }
+        public MuxFrame? Frame { get; }
+        public string? Message { get; }
+    }
+
+    /// <summary>Пробует разобрать кадр, начинающийся с флага в позиции start.</summary>
+    private ParseResult TryParseAt(int start)
+    {
+        // Минимум: F9 Addr Ctrl Len
+        if (_count - start < 4)
+            return new ParseResult(ParseStatus.Incomplete);
+
+        int i = start + 1;
+        byte address = _buffer[i++];
+        byte control = _buffer[i++];
+        byte len1 = _buffer[i++];
+        if ((address & 0x01) == 0 || !TryGetFrameType(control, out var type))
+            return new ParseResult(ParseStatus.BadHeader, message: $"Некорректный заголовок: addr=0x{address:X2} ctrl=0x{control:X2}");
+
+        int length;
+        if ((len1 & 0x01) != 0)
+        {
+            length = len1 >> 1;
+        }
+        else
+        {
+            if (_count - start < 5)
+                return new ParseResult(ParseStatus.Incomplete);
+            length = (len1 >> 1) | (_buffer[i++] << 7);
+        }
+        if (length > MaxPayloadLength)
+            return new ParseResult(ParseStatus.BadHeader, message: $"Длина {length} превышает максимум {MaxPayloadLength}");
+
+        int headerEnd = i;
+        int fcsIndex = headerEnd + length;
+        int closeIndex = fcsIndex + 1;
+        if (closeIndex >= _count)
+            return new ParseResult(ParseStatus.Incomplete);
+        if (_buffer[closeIndex] != FrameConstants.Flag)
+            return new ParseResult(ParseStatus.MissingClosingFlag);
+
+        var header = _buffer.AsSpan(start + 1, headerEnd - start - 1);
+        var payload = _buffer.AsSpan(headerEnd, length);
+        bool fcsOk = type == FrameType.UIH
+            ? Fcs.Check(header, ReadOnlySpan<byte>.Empty, _buffer[fcsIndex])
+            : Fcs.Check(header, payload, _buffer[fcsIndex]);
+        if (!fcsOk)
+            return new ParseResult(ParseStatus.BadFcs, closeIndex);
+
+        var frame = new MuxFrame(
+            address >> 2,
+            type,
+            (address & 0x02) != 0,
+            (control & FrameConstants.PollFinalBit) != 0,
+            payload.ToArray(),
+            _buffer.AsSpan(start, closeIndex - start + 1).ToArray());
+        return new ParseResult(ParseStatus.Ok, closeIndex, frame);
+    }
+
+    /// <summary>Позиция флага, с которого в буфере начинается целый корректный кадр (после from), или -1.</summary>
+    private int FindCompleteFrameAfter(int from)
+    {
+        int p = from;
+        while (p < _count)
+        {
+            int flag = Array.IndexOf(_buffer, FrameConstants.Flag, p, _count - p);
+            if (flag < 0)
+                return -1;
+            while (flag + 1 < _count && _buffer[flag + 1] == FrameConstants.Flag)
+                flag++;
+            if (TryParseAt(flag).Status == ParseStatus.Ok)
+                return flag;
+            p = flag + 1;
+        }
+        return -1;
     }
 
     private static bool TryGetFrameType(byte control, out FrameType type)
