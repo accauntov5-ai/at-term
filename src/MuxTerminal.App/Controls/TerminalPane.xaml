@@ -23,8 +23,9 @@
 
         <!-- Панель инструментов вкладки -->
         <Border Grid.Row="0" BorderThickness="0,0,0,1" BorderBrush="#FFD0D0D0" Background="#FFF5F6F7" Padding="4,3">
-            <DockPanel LastChildFill="False">
-                <StackPanel Orientation="Horizontal" DockPanel.Dock="Left">
+            <!-- WrapPanel: на узком (вынесенном/разделённом) окне кнопки переносятся на вторую строку -->
+            <WrapPanel>
+                <StackPanel Orientation="Horizontal" Margin="0,0,12,0">
                     <Border x:Name="StatePanel" CornerRadius="3" Padding="6,1" Margin="0,0,8,0" Background="#FFE0E0E0" VerticalAlignment="Center">
                         <StackPanel Orientation="Horizontal">
                             <Ellipse x:Name="StateDot" Width="9" Height="9" Fill="Gray" Margin="0,0,5,0" VerticalAlignment="Center" />
@@ -45,15 +46,18 @@
                     <CheckBox x:Name="TimestampCheck" Content="Время" Checked="ViewMode_Changed" Unchecked="ViewMode_Changed" />
                     <CheckBox x:Name="EchoCheck" Content="Локальное эхо" Checked="ViewMode_Changed" Unchecked="ViewMode_Changed"
                               ToolTip="Показывать отправленные данные (если эхо модема выключено, ATE0)" />
+                    <CheckBox x:Name="DataFramesCheck" Content="Кадры данных" IsChecked="True" Visibility="Collapsed"
+                              Checked="ViewMode_Changed" Unchecked="ViewMode_Changed"
+                              ToolTip="Показывать UIH-кадры каналов 1..63. Снимите, чтобы видеть только служебный обмен (SABM/UA/DISC, DLC0, ошибки)" />
                     <CheckBox x:Name="WrapCheck" Content="Перенос" IsChecked="True" Checked="Wrap_Changed" Unchecked="Wrap_Changed" />
                 </StackPanel>
-                <StackPanel Orientation="Horizontal" DockPanel.Dock="Right">
-                    <Button Style="{StaticResource ToolButton}" Content="⧉" Click="Layout_Click" Tag="float" ToolTip="Вынести в отдельное окно" />
-                    <Button Style="{StaticResource ToolButton}" Content="▭" Click="Layout_Click" Tag="dock" ToolTip="Вернуть во вкладку главного окна" />
-                    <Button Style="{StaticResource ToolButton}" Content="◫" Click="Layout_Click" Tag="splitV" ToolTip="Разделить: в новую группу справа" />
-                    <Button Style="{StaticResource ToolButton}" Content="⬓" Click="Layout_Click" Tag="splitH" ToolTip="Разделить: в новую группу снизу" />
+                <StackPanel Orientation="Horizontal">
+                    <Button Style="{StaticResource ToolButton}" Content="В окно" Click="Layout_Click" Tag="float" ToolTip="Вынести в отдельное окно (Ctrl+Shift+O)" />
+                    <Button Style="{StaticResource ToolButton}" Content="Во вкладку" Click="Layout_Click" Tag="dock" ToolTip="Вернуть во вкладку главного окна (Ctrl+Shift+T)" />
+                    <Button Style="{StaticResource ToolButton}" Content="Справа" Click="Layout_Click" Tag="splitV" ToolTip="Разделить окно: перенести вкладку в новую группу справа" />
+                    <Button Style="{StaticResource ToolButton}" Content="Снизу" Click="Layout_Click" Tag="splitH" ToolTip="Разделить окно: перенести вкладку в новую группу снизу" />
                 </StackPanel>
-            </DockPanel>
+            </WrapPanel>
         </Border>
 
         <!-- Вывод: независимый скроллбар у каждой вкладки -->
@@ -75,12 +79,12 @@
                         <ComboBoxItem Content="нет" Tag="" />
                     </ComboBox>
                     <CheckBox x:Name="HexInputCheck" Content="HEX-ввод" ToolTip="Вводить байты в HEX: 41 54 0D" />
-                    <Button Style="{StaticResource ToolButton}" Content="Ctrl+Z" Click="CtrlZ_Click" ToolTip="Отправить 0x1A (завершить SMS после AT+CMGS)" />
-                    <Button Style="{StaticResource ToolButton}" Content="Esc" Click="Esc_Click" ToolTip="Отправить 0x1B (отменить ввод SMS)" />
+                    <Button Style="{StaticResource ToolButton}" Content="Ctrl+Z" Click="CtrlZ_Click" ToolTip="Отправить текст из строки ввода и 0x1A — завершение SMS после AT+CMGS" />
+                    <Button Style="{StaticResource ToolButton}" Content="Esc" Click="Esc_Click" ToolTip="Отправить 0x1B — отмена ввода SMS" />
                     <Button x:Name="SendButton" Content="Отправить" Padding="12,2" Click="Send_Click" IsDefault="False" />
                 </StackPanel>
                 <TextBox x:Name="Input" FontFamily="Consolas, Cascadia Mono, Courier New" FontSize="13" VerticalContentAlignment="Center"
-                         PreviewKeyDown="Input_PreviewKeyDown" ToolTip="Enter — отправить, ↑/↓ — история команд" />
+                         PreviewKeyDown="Input_PreviewKeyDown" ToolTip="Enter — отправить, стрелки вверх/вниз — история команд, Ctrl+Z — отправить текст и 0x1A (SMS)" />
             </DockPanel>
         </Border>
     </Grid>

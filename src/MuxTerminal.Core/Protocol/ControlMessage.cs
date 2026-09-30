@@ -103,7 +103,7 @@ public sealed record ControlMessage(ControlMessageType Type, bool IsCommand, byt
 
     public override string ToString()
     {
-        string name = Enum.IsDefined(Type) ? Type.ToString() : $"0x{(byte)Type:X2}";
+        string name = Enum.IsDefined(typeof(ControlMessageType), Type) ? Type.ToString() : $"0x{(byte)Type:X2}";
         string kind = IsCommand ? "cmd" : "rsp";
         if (Type == ControlMessageType.MSC && Value.Length >= 2)
         {
@@ -121,6 +121,6 @@ public sealed record ControlMessage(ControlMessageType Type, bool IsCommand, byt
         if (s.HasFlag(ModemSignals.RTR)) parts.Add("RTR");
         if (s.HasFlag(ModemSignals.IC)) parts.Add("IC");
         if (s.HasFlag(ModemSignals.DV)) parts.Add("DV");
-        return parts.Count == 0 ? "-" : string.Join(' ', parts);
+        return parts.Count == 0 ? "-" : string.Join(" ", parts);
     }
 }

@@ -4,6 +4,7 @@ using System.Text;
 using MuxTerminal.Core.Protocol;
 using MuxTerminal.Core.Session;
 using MuxTerminal.Core.Transport;
+using MuxTerminal.Core.Util;
 
 namespace MuxTerminal.Core.Emulator;
 
@@ -70,7 +71,7 @@ public sealed class ModemEmulator : IAsyncDisposable
         {
             while (!_cts.IsCancellationRequested)
             {
-                int n = await _stream.ReadAsync(buffer, _cts.Token);
+                int n = await _stream.ReadAsync(buffer, 0, buffer.Length, _cts.Token);
                 if (n == 0)
                     break;
                 await ProcessAsync(buffer, n);
@@ -291,7 +292,7 @@ public sealed class ModemEmulator : IAsyncDisposable
             case "AT+CGMM": return Ok("GSM0710-EMU");
             case "AT+CGMR": return Ok("EMU01A01V01");
             case "AT+CGSN": return Ok("867000000000001");
-            case "AT+CSQ": return Ok($"+CSQ: {Random.Shared.Next(15, 28)},99");
+            case "AT+CSQ": return Ok($"+CSQ: {Compat.RandomNext(15, 28)},99");
             case "AT+CREG?": return Ok("+CREG: 0,1");
             case "AT+COPS?": return Ok("+COPS: 0,0,\"EMU Network\",7");
             case "AT+CPIN?": return Ok("+CPIN: READY");
@@ -326,8 +327,8 @@ public sealed class ModemEmulator : IAsyncDisposable
                 await Task.Delay(NmeaInterval, _cts.Token);
                 if (!_mux || NmeaDlci <= 0 || !_open.ContainsKey(NmeaDlci))
                     continue;
-                lat += (Random.Shared.NextDouble() - 0.5) * 0.0002;
-                lon += (Random.Shared.NextDouble() - 0.5) * 0.0002;
+                lat += (Compat.RandomDouble() - 0.5) * 0.0002;
+                lon += (Compat.RandomDouble() - 0.5) * 0.0002;
                 var now = DateTime.UtcNow;
                 string gga = Nmea($"GPGGA,{now:HHmmss.ff},{ToNmea(lat, 2)},N,{ToNmea(lon, 3)},E,1,08,0.9,145.0,M,14.0,M,,");
                 string rmc = Nmea($"GPRMC,{now:HHmmss.ff},A,{ToNmea(lat, 2)},N,{ToNmea(lon, 3)},E,0.10,0.0,{now:ddMMyy},,,A");
@@ -385,7 +386,7 @@ public sealed class ModemEmulator : IAsyncDisposable
         await _writeLock.WaitAsync(_cts.Token);
         try
         {
-            await _stream.WriteAsync(data, _cts.Token);
+            await _stream.WriteAsync(data, 0, data.Length, _cts.Token);
             await _stream.FlushAsync(_cts.Token);
         }
         finally
@@ -397,12 +398,12 @@ public sealed class ModemEmulator : IAsyncDisposable
     public async ValueTask DisposeAsync()
     {
         _cts.Cancel();
-        await _stream.DisposeAsync();
+        _stream.Dispose();
         foreach (var t in new[] { _loop, _nmeaLoop })
         {
             if (t is null)
                 continue;
-            try { await t.WaitAsync(TimeSpan.FromSeconds(1)); } catch { /* завершение */ }
+            try { await t.WithTimeout(TimeSpan.FromSeconds(1)); } catch { /* завершение */ }
         }
         _cts.Dispose();
     }
@@ -427,7 +428,7 @@ public sealed class EmulatorTransport : IMuxTransport
 
     public async ValueTask DisposeAsync()
     {
-        await _client.DisposeAsync();
+        _client.Dispose();
         await Emulator.DisposeAsync();
     }
 }

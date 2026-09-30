@@ -1,6 +1,7 @@
 using System.Collections.Concurrent;
 using System.Text;
 using MuxTerminal.Core.Protocol;
+using MuxTerminal.Core.Util;
 
 namespace MuxTerminal.Core.Session;
 
@@ -164,7 +165,7 @@ public sealed class MuxSession : IAsyncDisposable
         await _writeLock.WaitAsync(ct);
         try
         {
-            await _stream.WriteAsync(bytes, ct);
+            await _stream.WriteAsync(bytes, 0, bytes.Length, ct);
             await _stream.FlushAsync(ct);
         }
         finally
@@ -175,7 +176,7 @@ public sealed class MuxSession : IAsyncDisposable
 
         try
         {
-            var response = await tcs.Task.WaitAsync(timeout, ct);
+            var response = await tcs.Task.WithTimeout(timeout, ct);
             Emit(response.IsOk ? LogLevel.Info : LogLevel.Warning, $"AT << {response.Text.Trim().Replace("\r", "").Replace("\n", " | ")}");
             return response;
         }
@@ -255,7 +256,7 @@ public sealed class MuxSession : IAsyncDisposable
             try
             {
                 await WriteFrameAsync(command, ct);
-                return await tcs.Task.WaitAsync(_options.ResponseTimeout, ct);
+                return await tcs.Task.WithTimeout(_options.ResponseTimeout, ct);
             }
             catch (TimeoutException)
             {
@@ -324,7 +325,7 @@ public sealed class MuxSession : IAsyncDisposable
         await _writeLock.WaitAsync(ct);
         try
         {
-            await _stream.WriteAsync(frame.Raw, ct);
+            await _stream.WriteAsync(frame.Raw, 0, frame.Raw.Length, ct);
             await _stream.FlushAsync(ct);
         }
         finally
@@ -365,7 +366,7 @@ public sealed class MuxSession : IAsyncDisposable
         {
             while (!ct.IsCancellationRequested)
             {
-                int n = await _stream.ReadAsync(buffer, ct);
+                int n = await _stream.ReadAsync(buffer, 0, buffer.Length, ct);
                 if (n == 0)
                 {
                     if (!ct.IsCancellationRequested)
@@ -409,7 +410,7 @@ public sealed class MuxSession : IAsyncDisposable
                     _atBuffer.Add(b);
                 if (_atTcs is { } tcs && TryFindFinalResult(_atBuffer, out var result, out int end))
                 {
-                    var text = Encoding.Latin1.GetString(_atBuffer.GetRange(0, end).ToArray());
+                    var text = Compat.Latin1.GetString(_atBuffer.GetRange(0, end).ToArray());
                     if (end < _atBuffer.Count)
                         leftover = _atBuffer.GetRange(end, _atBuffer.Count - end).ToArray();
                     _atBuffer.Clear();
@@ -444,7 +445,7 @@ public sealed class MuxSession : IAsyncDisposable
                 continue;
             if (i > lineStart)
             {
-                var line = Encoding.Latin1.GetString(buffer.GetRange(lineStart, i - lineStart).ToArray()).Trim();
+                var line = Compat.Latin1.GetString(buffer.GetRange(lineStart, i - lineStart).ToArray()).Trim();
                 if (FinalResults.Contains(line) || line.StartsWith("+CME ERROR", StringComparison.Ordinal) || line.StartsWith("+CMS ERROR", StringComparison.Ordinal))
                 {
                     endIndex = i + 1;
@@ -613,7 +614,7 @@ public sealed class MuxSession : IAsyncDisposable
             await SendControlAsync(ControlMessage.CloseDown(), timeout.Token);
             try
             {
-                await _cldTcs.Task.WaitAsync(_options.ResponseTimeout, timeout.Token);
+                await _cldTcs.Task.WithTimeout(_options.ResponseTimeout, timeout.Token);
                 Emit(LogLevel.Info, "Мультиплексор закрыт (CLD), модем в AT-режиме");
             }
             catch (TimeoutException)

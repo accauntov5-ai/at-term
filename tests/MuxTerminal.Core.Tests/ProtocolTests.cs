@@ -44,8 +44,8 @@ public class FrameEncoderTests
     public void Uih_WithAtCommand()
     {
         var frame = FrameEncoder.Uih(1, "ATI\r"u8);
-        Assert.Equal(new byte[] { 0xF9, 0x07, 0xEF, 0x09, 0x41, 0x54, 0x49, 0x0D }, frame[..8]);
-        Assert.Equal(0xF9, frame[^1]);
+        Assert.Equal(new byte[] { 0xF9, 0x07, 0xEF, 0x09, 0x41, 0x54, 0x49, 0x0D }, frame.Take(8).ToArray());
+        Assert.Equal(0xF9, frame[frame.Length - 1]);
     }
 
     [Fact]
@@ -128,7 +128,7 @@ public class FrameParserTests
     {
         var (frames, errors, parser) = Create();
         var bad = FrameEncoder.Uih(1, "XX"u8);
-        bad[^2] ^= 0xFF;
+        bad[bad.Length - 2] ^= 0xFF;
         parser.Feed(bad.Concat(FrameEncoder.Uih(1, "OK"u8)).ToArray());
         Assert.Equal("OK"u8.ToArray(), Assert.Single(frames).Payload);
         Assert.Contains(errors, e => e.Kind == FrameErrorKind.BadFcs);
@@ -138,7 +138,7 @@ public class FrameParserTests
     public void ResyncsAfterTruncatedFrame()
     {
         var (frames, _, parser) = Create();
-        var cut = FrameEncoder.Uih(1, "HELLO WORLD"u8)[..6];
+        var cut = FrameEncoder.Uih(1, "HELLO WORLD"u8).Take(6).ToArray();
         parser.Feed(cut.Concat(FrameEncoder.Uih(2, "OK"u8)).Concat(FrameEncoder.Uih(2, "!"u8)).ToArray());
         Assert.Contains(frames, f => f.Dlci == 2 && f.Payload.SequenceEqual("OK"u8.ToArray()));
         Assert.Contains(frames, f => f.Dlci == 2 && f.Payload.SequenceEqual("!"u8.ToArray()));

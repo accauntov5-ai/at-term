@@ -15,16 +15,15 @@ jobs:
         with:
           dotnet-version: 8.0.x
 
-      - name: Test
-        run: dotnet test tests/MuxTerminal.Core.Tests -c Release
+      - name: Build
+        run: dotnet build MuxTerminal.sln -c Release
 
-      - name: Publish (single exe, win-x64)
-        run: >
-          dotnet publish src/MuxTerminal.App -c Release -r win-x64 --self-contained true
-          -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true
-          -p:EnableCompressionInSingleFile=true -p:DebugType=None -o publish
+      - name: Test (net8.0 + net48)
+        run: dotnet test tests/MuxTerminal.Core.Tests -c Release --no-build
 
       - uses: actions/upload-artifact@v4
         with:
-          name: MuxTerminal-win-x64
-          path: publish/MuxTerminal.exe
+          name: MuxTerminal-net48
+          path: |
+            src/MuxTerminal.App/bin/Release/net48/
+            !src/MuxTerminal.App/bin/Release/net48/**/*.pdb

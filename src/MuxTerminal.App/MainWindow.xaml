@@ -44,7 +44,7 @@
                 <StackPanel Orientation="Horizontal" Margin="0,2">
                     <TextBlock Style="{StaticResource Label}" Text="Порт:" Margin="4,0,4,0" />
                     <ComboBox x:Name="PortCombo" Width="150" IsEditable="True" />
-                    <Button Content="⟳" Width="26" Margin="2,0,0,0" Click="RefreshPorts_Click" ToolTip="Обновить список портов" />
+                    <Button Content="Обновить" Padding="6,0" Margin="2,0,0,0" Click="RefreshPorts_Click" ToolTip="Обновить список портов" />
                     <TextBlock Style="{StaticResource Label}" Text="Скорость:" />
                     <ComboBox x:Name="BaudCombo" Width="90" IsEditable="True" />
                     <CheckBox x:Name="RtsCtsCheck" Content="RTS/CTS" VerticalAlignment="Center" Margin="8,0,0,0" ToolTip="Аппаратное управление потоком" />
@@ -64,8 +64,8 @@
                     <TextBox x:Name="ChannelsBox" Width="70" VerticalContentAlignment="Center" ToolTip="Номера DLC через запятую (1..63)" />
                 </StackPanel>
                 <StackPanel Orientation="Horizontal" Margin="8,2,0,2">
-                    <Button x:Name="StartButton" Content="▶ Старт MUX" Padding="12,3" Click="Start_Click" FontWeight="SemiBold" />
-                    <Button x:Name="StopButton" Content="■ Стоп MUX" Padding="12,3" Margin="6,0,0,0" Click="Stop_Click" IsEnabled="False" />
+                    <Button x:Name="StartButton" Content="Старт MUX" Padding="12,3" Click="Start_Click" FontWeight="SemiBold" />
+                    <Button x:Name="StopButton" Content="Стоп MUX" Padding="12,3" Margin="6,0,0,0" Click="Stop_Click" IsEnabled="False" />
                     <TextBlock Style="{StaticResource Label}" Text="DLC:" Margin="16,0,4,0" />
                     <TextBox x:Name="ExtraDlcBox" Width="34" Text="4" VerticalContentAlignment="Center" />
                     <Button x:Name="AddChannelButton" Content="+ Открыть канал" Padding="8,3" Margin="4,0,0,0" Click="AddChannel_Click" IsEnabled="False"

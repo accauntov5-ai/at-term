@@ -33,43 +33,49 @@ public sealed class InMemoryDuplexStream : Stream
     public override long Length => throw new NotSupportedException();
     public override long Position { get => throw new NotSupportedException(); set => throw new NotSupportedException(); }
 
-    public override async ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default)
+    private void ThrowIfDisposed()
     {
-        ObjectDisposedException.ThrowIf(_disposed, this);
+        if (_disposed)
+            throw new ObjectDisposedException(nameof(InMemoryDuplexStream));
+    }
+
+    public override async Task<int> ReadAsync(byte[] buffer, int offset, int count, CancellationToken cancellationToken)
+    {
+        ThrowIfDisposed();
         if (_currentOffset >= _current.Length)
         {
-            if (!await _incoming.Reader.WaitToReadAsync(cancellationToken))
+            if (!await _incoming.Reader.WaitToReadAsync(cancellationToken).ConfigureAwait(false))
                 return 0;
             if (!_incoming.Reader.TryRead(out var next))
                 return 0;
             _current = next;
             _currentOffset = 0;
         }
-        int n = Math.Min(buffer.Length, _current.Length - _currentOffset);
-        _current.AsMemory(_currentOffset, n).CopyTo(buffer);
+        int n = Math.Min(count, _current.Length - _currentOffset);
+        Buffer.BlockCopy(_current, _currentOffset, buffer, offset, n);
         _currentOffset += n;
         return n;
     }
 
-    public override Task<int> ReadAsync(byte[] buffer, int offset, int count, CancellationToken cancellationToken)
-        => ReadAsync(buffer.AsMemory(offset, count), cancellationToken).AsTask();
-
     public override int Read(byte[] buffer, int offset, int count)
         => ReadAsync(buffer, offset, count, CancellationToken.None).GetAwaiter().GetResult();
 
-    public override ValueTask WriteAsync(ReadOnlyMemory<byte> buffer, CancellationToken cancellationToken = default)
+    public override Task WriteAsync(byte[] buffer, int offset, int count, CancellationToken cancellationToken)
     {
-        ObjectDisposedException.ThrowIf(_disposed, this);
-        if (buffer.Length > 0 && !_outgoing.Writer.TryWrite(buffer.ToArray()))
-            throw new IOException("Другая сторона закрыта");
-        return ValueTask.CompletedTask;
+        Write(buffer, offset, count);
+        return Task.CompletedTask;
     }
 
-    public override Task WriteAsync(byte[] buffer, int offset, int count, CancellationToken cancellationToken)
-        => WriteAsync(buffer.AsMemory(offset, count), cancellationToken).AsTask();
-
     public override void Write(byte[] buffer, int offset, int count)
-        => WriteAsync(buffer.AsMemory(offset, count)).GetAwaiter().GetResult();
+    {
+        ThrowIfDisposed();
+        if (count == 0)
+            return;
+        var copy = new byte[count];
+        Buffer.BlockCopy(buffer, offset, copy, 0, count);
+        if (!_outgoing.Writer.TryWrite(copy))
+            throw new IOException("Другая сторона закрыта");
+    }
 
     public override void Flush() { }
     public override Task FlushAsync(CancellationToken cancellationToken) => Task.CompletedTask;

@@ -3,6 +3,7 @@ using System.Text;
 using MuxTerminal.Core.Emulator;
 using MuxTerminal.Core.Session;
 using MuxTerminal.Core.Transport;
+using MuxTerminal.Core.Util;
 
 namespace MuxTerminal.Core.Tests;
 
@@ -23,7 +24,7 @@ public class SessionTests
         session.DataReceived += (dlci, data) =>
         {
             var sb = received.GetOrAdd(dlci, _ => new StringBuilder());
-            lock (sb) sb.Append(Encoding.Latin1.GetString(data));
+            lock (sb) sb.Append(Compat.Latin1.GetString(data));
         };
         await session.StartAsync();
         return (transport, session, received);

@@ -52,7 +52,7 @@ public sealed record CmuxParameters(int Mode, int N1)
         int eq = command.IndexOf('=');
         if (eq < 0)
             return new CmuxParameters(0, FrameConstants.DefaultN1);
-        var parts = command[(eq + 1)..].Split(',');
+        var parts = command.Substring(eq + 1).Split(',');
         int mode = TryInt(parts, 0) ?? 0;
         int n1 = TryInt(parts, 3) ?? FrameConstants.DefaultN1;
         if (n1 is < 1 or > FrameConstants.MaxLength)

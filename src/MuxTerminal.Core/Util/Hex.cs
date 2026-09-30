@@ -47,21 +47,31 @@ public static class Hex
         var digits = new StringBuilder();
         foreach (var token in text.Split(new[] { ' ', ',', ';', '\t', '\r', '\n', '-', ':' }, StringSplitOptions.RemoveEmptyEntries))
         {
-            var t = token.StartsWith("0x", StringComparison.OrdinalIgnoreCase) ? token[2..] : token;
+            var t = token.StartsWith("0x", StringComparison.OrdinalIgnoreCase) ? token.Substring(2) : token;
             if (t.Length % 2 != 0)
                 t = "0" + t;
             digits.Append(t);
         }
         if (digits.Length == 0)
             return false;
-        try
+        var result = new byte[digits.Length / 2];
+        for (int i = 0; i < result.Length; i++)
         {
-            bytes = Convert.FromHexString(digits.ToString());
-            return true;
+            int hi = HexValue(digits[2 * i]), lo = HexValue(digits[2 * i + 1]);
+            if (hi < 0 || lo < 0)
+                return false;
+            result[i] = (byte)((hi << 4) | lo);
         }
-        catch (FormatException)
-        {
-            return false;
-        }
+        bytes = result;
+        return true;
     }
+
+    private static int HexValue(char c) => c switch
+    {
+        >= '0' and <= '9' => c - '0',
+        >= 'a' and <= 'f' => c - 'a' + 10,
+        >= 'A' and <= 'F' => c - 'A' + 10,
+        _ => -1,
+    };
+
 }

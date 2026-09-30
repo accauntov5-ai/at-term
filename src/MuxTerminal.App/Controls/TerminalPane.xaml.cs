@@ -20,7 +20,8 @@ public enum ChunkKind
 }
 
 /// <summary>Порция данных в истории вкладки. Храним байты, чтобы перерисовывать Текст ↔ HEX без потерь.</summary>
-public sealed record TerminalChunk(DateTime Time, ChunkKind Kind, byte[] Data, string? Text = null);
+/// <param name="IsDataFrame">Кадр данных канала 1..63 в системном логе — может скрываться фильтром.</param>
+public sealed record TerminalChunk(DateTime Time, ChunkKind Kind, byte[] Data, string? Text = null, bool IsDataFrame = false);
 
 /// <summary>
 /// Окно терминала одного канала (или системного лога). Данные поступают из любого потока через
@@ -69,6 +70,7 @@ public partial class TerminalPane : UserControl
             CloseChannelButton.Visibility = channelOnly;
             EchoCheck.Visibility = channelOnly;
             StatePanel.Visibility = channelOnly;
+            DataFramesCheck.Visibility = value ? Visibility.Visible : Visibility.Collapsed;
             if (value)
                 TimestampCheck.IsChecked = true;
         }
@@ -93,8 +95,8 @@ public partial class TerminalPane : UserControl
 
     // ───────────── Приём данных (из любого потока) ─────────────
 
-    public void Append(ChunkKind kind, byte[] data, string? text = null)
-        => _incoming.Enqueue(new TerminalChunk(DateTime.Now, kind, data, text));
+    public void Append(ChunkKind kind, byte[] data, string? text = null, bool isDataFrame = false)
+        => _incoming.Enqueue(new TerminalChunk(DateTime.Now, kind, data, text, isDataFrame));
 
     public void AppendInfo(string text, ChunkKind kind = ChunkKind.Info)
         => Append(kind, Array.Empty<byte>(), text);
@@ -120,7 +122,7 @@ public partial class TerminalPane : UserControl
         if (_outputLength + sb.Length > MaxChars)
         {
             var combined = Output.Text + sb;
-            SetOutput(combined[^(MaxChars / 2)..]);
+            SetOutput(Compat.TakeLast(combined, MaxChars / 2));
         }
         else
         {
@@ -141,7 +143,7 @@ public partial class TerminalPane : UserControl
         for (int i = start; i < _history.Count; i++)
             Render(_history[i], sb);
         var text = sb.ToString();
-        SetOutput(text.Length > MaxChars ? text[^(MaxChars / 2)..] : text);
+        SetOutput(text.Length > MaxChars ? Compat.TakeLast(text, MaxChars / 2) : text);
         Output.ScrollToEnd();
     }
 
@@ -155,6 +157,8 @@ public partial class TerminalPane : UserControl
     {
         bool hex = IsHexMode;
         bool time = TimestampCheck.IsChecked == true;
+        if (chunk.IsDataFrame && DataFramesCheck.IsChecked != true)
+            return;
 
         if (IsLogMode || chunk.Kind is ChunkKind.Info or ChunkKind.Error || hex)
         {
@@ -272,25 +276,34 @@ public partial class TerminalPane : UserControl
         }
     }
 
-    private async Task SendInputAsync()
+    /// <param name="terminator">
+    /// null — добавить выбранное окончание строки (CR/CRLF/LF); иначе — этот байт (0x1A для завершения SMS, 0x1B для отмены).
+    /// </param>
+    private async Task SendInputAsync(byte? terminator = null)
     {
         string line = Input.Text;
         byte[] data;
         if (HexInputCheck.IsChecked == true)
         {
-            if (!Hex.TryParse(line, out data))
+            if (line.Trim().Length == 0)
+                data = Array.Empty<byte>();
+            else if (!Hex.TryParse(line, out data))
             {
                 AppendInfo("Некорректная HEX-строка: " + line, ChunkKind.Error);
                 return;
             }
+            if (terminator is null && data.Length == 0)
+                return;
         }
         else
         {
-            var ending = (LineEndingCombo.SelectedItem as ComboBoxItem)?.Tag as string ?? "\r";
+            var ending = terminator is null ? (LineEndingCombo.SelectedItem as ComboBoxItem)?.Tag as string ?? "\r" : "";
             data = Encoding.UTF8.GetBytes(line + ending);
         }
+        if (terminator is { } t)
+            data = data.Concat(new[] { t }).ToArray();
 
-        if (line.Length > 0 && (_commandHistory.Count == 0 || _commandHistory[^1] != line))
+        if (line.Length > 0 && (_commandHistory.Count == 0 || _commandHistory[_commandHistory.Count - 1] != line))
             _commandHistory.Add(line);
         _historyIndex = -1;
         Input.Clear();
@@ -299,9 +312,10 @@ public partial class TerminalPane : UserControl
 
     private async void Send_Click(object sender, RoutedEventArgs e) => await SendInputAsync();
 
-    private async void CtrlZ_Click(object sender, RoutedEventArgs e) => await SendAsync(new byte[] { 0x1A });
+    // Текст SMS из строки ввода уходит вместе с Ctrl+Z одной посылкой.
+    private async void CtrlZ_Click(object sender, RoutedEventArgs e) => await SendInputAsync(0x1A);
 
-    private async void Esc_Click(object sender, RoutedEventArgs e) => await SendAsync(new byte[] { 0x1B });
+    private async void Esc_Click(object sender, RoutedEventArgs e) => await SendInputAsync(0x1B);
 
     private async void Input_PreviewKeyDown(object sender, KeyEventArgs e)
     {
@@ -331,7 +345,7 @@ public partial class TerminalPane : UserControl
                 break;
             case Key.Z when Keyboard.Modifiers == ModifierKeys.Control:
                 e.Handled = true;
-                await SendAsync(new byte[] { 0x1A });
+                await SendInputAsync(0x1A);
                 break;
         }
     }

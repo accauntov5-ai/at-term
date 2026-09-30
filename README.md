@@ -18,43 +18,79 @@ COM-порту и раскладывает логические каналы (DL
 * Приём: потоковый разбор кадров, проверка FCS, ресинхронизация после мусора и битых кадров, маршрутизация по DLC.
 * Передача: UIH-кадры, автоматическая нарезка по N1, потокобезопасная запись (кадры разных вкладок не перемешиваются).
 * Канал управления DLC0: ответы на MSC / Test / PN / FCon / FCoff / CLD, NSC на неизвестные команды, учёт flow control.
-* Вкладки: независимый скролл, «Очистить», Текст / HEX, время, локальное эхо, перенос строк; ввод с историей (↑/↓),
-  выбор окончания строки (CR / CRLF / LF), HEX-ввод, кнопки Ctrl+Z / Esc для SMS.
+* Вкладки: независимый скролл, «Очистить», Текст / HEX, время, локальное эхо, перенос строк; ввод с историей (стрелки вверх/вниз),
+  выбор окончания строки (CR / CRLF / LF), HEX-ввод, Ctrl+Z (текст из строки + 0x1A — отправка SMS) / Esc.
+* System Log: сырые кадры в HEX, служебный обмен DLC0, ошибки FCS; фильтр «Кадры данных» скрывает поток данных каналов.
 * **Окна (AvalonDock):**
-  * вынести вкладку в отдельное окно — перетащить заголовок за пределы окна, кнопка `⧉`, `Ctrl+Shift+O` или меню «Окна»;
-  * вернуть во вкладку — кнопка `▭`, `Ctrl+Shift+T`, перетащить обратно или «Dock as Tabbed Document» в меню вкладки;
-  * разделить окно — перетащить вкладку на маркер у края, кнопки `◫` (справа) / `⬓` (снизу) или ПКМ → New Tab Group;
+  * вынести вкладку в отдельное окно — перетащить заголовок за пределы окна, кнопка «В окно», `Ctrl+Shift+O` или меню «Окна»;
+  * вернуть во вкладку — кнопка «Во вкладку», `Ctrl+Shift+T`, перетащить обратно или «Dock as Tabbed Document» в меню вкладки;
+  * разделить окно — перетащить вкладку на маркер у края, кнопки «Справа» / «Снизу» или ПКМ → New Tab Group;
   * «Собрать все окна во вкладки» и готовая раскладка «лог слева, каналы справа».
 * Открытие/закрытие отдельных каналов на лету, дополнительные DLC (кнопка «+ Открыть канал»).
 * **Эмулятор модема** (пункт «Эмулятор модема» в списке портов) — проверка без железа: AT-команды, SMS
   (`AT+CMGS="…"` → текст → Ctrl+Z), NMEA раз в секунду на DLC3, `AT+BINTEST` — бинарные 0x00..0xFF (в т.ч. 0xF9).
 * Сохранение содержимого вкладки в файл, запоминание настроек подключения.
 
-## Сборка и запуск
+## Платформа: Windows 7 и новее
 
-Нужен .NET 8 SDK.
+Приложение собирается под **.NET Framework 4.8** — это последняя версия .NET, которая работает на Windows 7
+(.NET 5–8 на Windows 7 не запускаются).
+
+* Windows 7 SP1 / 8.1: нужно установить .NET Framework 4.8 (офлайн-установщик `ndp48-x86-x64-allos-enu.exe` с сайта Microsoft).
+* Windows 10 (1903+) / 11: .NET Framework 4.8 уже есть в системе.
+
+Установка не нужна — достаточно скопировать папку `bin/Release/net48` (exe + несколько dll) и запустить `MuxTerminal.exe`.
+
+## Сборка
+
+Нужен .NET SDK 8 (собирает и net48, и net8.0; на Linux тоже).
 
 ```
-dotnet build MuxTerminal.sln
-dotnet test tests/MuxTerminal.Core.Tests
-dotnet run --project src/MuxTerminal.App
+dotnet build MuxTerminal.sln -c Release
+# программа: src/MuxTerminal.App/bin/Release/net48/
 ```
 
-Готовый один `MuxTerminal.exe` (без установки .NET):
+GitHub Actions (`.github/workflows/build.yml`) на каждый push собирает программу на Windows, прогоняет тесты
+(net8.0 и net48) и выкладывает артефакт `MuxTerminal-net48`.
+
+## Разработка и проверка на Linux
+
+**Тесты протокола** — под .NET 8 и под .NET Framework 4.8 (через Mono):
 
 ```
-dotnet publish src/MuxTerminal.App -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -p:EnableCompressionInSingleFile=true -o publish
+dotnet test tests/MuxTerminal.Core.Tests -f net8.0
+sudo apt install mono-runtime
+mono ~/.nuget/packages/xunit.runner.console/2.9.2/tools/net472/xunit.console.exe \
+     tests/MuxTerminal.Core.Tests/bin/Debug/net48/MuxTerminal.Core.Tests.dll
 ```
 
-GitHub Actions (`.github/workflows/build.yml`) собирает его на каждый push — артефакт `MuxTerminal-win-x64`.
+**Сама программа в Wine:**
+
+```
+sudo apt install wine winetricks
+export WINEPREFIX=~/.wine-mux
+winetricks -q dotnet48          # настоящий .NET Framework 4.8 — ближе всего к Windows 7 клиента
+                                # (без него Wine использует встроенный wine-mono — тоже работает)
+wine src/MuxTerminal.App/bin/Debug/net48/MuxTerminal.exe
+```
+
+COM-порт в Wine — это символическая ссылка на устройство Linux (пользователь должен быть в группе `dialout`):
+
+```
+ln -s /dev/ttyUSB0 ~/.wine-mux/dosdevices/com3    # в программе выбрать COM3
+```
+
+Проверено в Wine 9.0 + wine-mono 8.1: запуск MUX с эмулятором, AT-команды и SMS в каналах, поток NMEA,
+разделение окна, вынос вкладки в отдельное окно и возврат, корректная остановка (DISC + CLD).
+Что Wine не проверяет: поведение драйвера конкретного USB-модема в Windows 7 — финальная проверка на машине клиента.
 
 ## Структура
 
 | Проект | Назначение |
 |---|---|
-| `src/MuxTerminal.Core` | Протокол и логика без UI (net8.0): `Fcs`, `FrameEncoder`, `FrameParser`, `ControlMessage`, `MuxSession`, `SerialPortTransport`, `ModemEmulator` |
-| `src/MuxTerminal.App` | WPF-приложение (net8.0-windows) + AvalonDock |
-| `tests/MuxTerminal.Core.Tests` | xUnit: эталонные кадры, парсер, сессия против эмулятора, конкурентная запись |
+| `src/MuxTerminal.Core` | Протокол и логика без UI (net48 + net8.0): `Fcs`, `FrameEncoder`, `FrameParser`, `ControlMessage`, `MuxSession`, `SerialPortTransport`, `ModemEmulator` |
+| `src/MuxTerminal.App` | WPF-приложение (net48) + AvalonDock |
+| `tests/MuxTerminal.Core.Tests` | xUnit (net8.0 + net48): эталонные кадры, парсер, сессия против эмулятора, конкурентная запись |
 
 ## Уточнения к ТЗ (что сделано иначе и почему)
 
@@ -81,9 +117,9 @@ GitHub Actions (`.github/workflows/build.yml`) собирает его на ка
 
 ## Статус проверки
 
-* Ядро протокола покрыто автотестами (40 шт.): эталонные кадры из документации Quectel/SIMCom, разбор с мусором,
-  битыми и разрезанными кадрами, 0xF9 в данных, полный цикл сессии против эмулятора, конкурентная запись из разных каналов.
-* WPF-интерфейс собирается, но в этой среде (Linux) не запускался — перед использованием проверьте его на Windows,
-  начав с «Эмулятора модема».
-* На реальном модеме не проверялось. Если модему нужны особые параметры, укажите их в поле «Команда»,
-  например `AT+CMUX=0,0,5,127,10,3,30,10,2`.
+* 40 автотестов ядра проходят и под .NET 8, и под .NET Framework 4.8 (Mono): эталонные кадры из документации
+  Quectel/SIMCom, разбор с мусором, битыми и разрезанными кадрами, 0xF9 в данных, полный цикл сессии против эмулятора,
+  конкурентная запись из разных каналов.
+* Интерфейс проверен в Wine (см. выше).
+* На реальном модеме и на реальной Windows 7 не проверялось. Если модему нужны особые параметры, укажите их в поле
+  «Команда», например `AT+CMUX=0,0,5,127,10,3,30,10,2`.

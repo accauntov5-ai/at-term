@@ -76,6 +76,6 @@ public sealed class SerialPortTransport : IMuxTransport
             // Порт мог быть физически отключён (USB-модем) — закрываем как можем.
         }
         _port.Dispose();
-        return ValueTask.CompletedTask;
+        return default;
     }
 }

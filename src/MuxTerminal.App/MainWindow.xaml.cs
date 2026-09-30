@@ -407,7 +407,7 @@ public partial class MainWindow : Window
             return;
         }
 
-        _logPane.AppendInfo($"════ Подключение: {_transport.Name} ════");
+        _logPane.AppendInfo($"==== Подключение: {_transport.Name} ====");
         var session = new MuxSession(_transport.Stream, new MuxSessionOptions
         {
             CmuxCommand = cmux,
@@ -492,7 +492,7 @@ public partial class MainWindow : Window
         }
         foreach (var ch in _channels.Values)
             UpdateChannelUi(ch.Dlci, ChannelState.Closed);
-        _logPane.AppendInfo($"════ Отключено{(session.TerminationReason is { } r ? ": " + r : "")} ════");
+        _logPane.AppendInfo($"==== Отключено{(session.TerminationReason is { } r ? ": " + r : "")} ====");
         UpdateUi();
     }
 
@@ -534,7 +534,8 @@ public partial class MainWindow : Window
     }
 
     private void OnFrameTraffic(TrafficDirection dir, MuxFrame frame)
-        => _logPane.Append(dir == TrafficDirection.Rx ? ChunkKind.Rx : ChunkKind.Tx, frame.Raw, frame.ToString());
+        => _logPane.Append(dir == TrafficDirection.Rx ? ChunkKind.Rx : ChunkKind.Tx, frame.Raw, frame.ToString(),
+            isDataFrame: frame.Dlci > 0 && frame.Type is FrameType.UIH or FrameType.UI);
 
     private void OnFrameError(FrameError error)
         => _logPane.Append(ChunkKind.Error, error.Data, $"{error.Message} ({error.Data.Length} байт): {Hex.Format(error.Data, 48)}");

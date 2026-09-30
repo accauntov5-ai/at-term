@@ -2,7 +2,8 @@
 
   <PropertyGroup>
     <OutputType>WinExe</OutputType>
-    <TargetFramework>net8.0-windows</TargetFramework>
+    <!-- .NET Framework 4.8: работает на Windows 7 SP1 и новее, отдельная установка .NET не нужна на Windows 10/11. -->
+    <TargetFramework>net48</TargetFramework>
     <UseWPF>true</UseWPF>
     <EnableWindowsTargeting>true</EnableWindowsTargeting>
     <RootNamespace>MuxTerminal.App</RootNamespace>
@@ -14,6 +15,13 @@
   <ItemGroup>
     <PackageReference Include="Dirkster.AvalonDock" Version="4.72.1" />
     <PackageReference Include="Dirkster.AvalonDock.Themes.VS2013" Version="4.72.1" />
+    <PackageReference Include="System.Text.Json" Version="8.0.5" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Reference Include="System" />
+    <Using Remove="System.Net.Http" />
+    <Compile Include="..\MuxTerminal.Core\Polyfills\IsExternalInit.cs" Link="Polyfills\IsExternalInit.cs" />
   </ItemGroup>
 
   <ItemGroup>
