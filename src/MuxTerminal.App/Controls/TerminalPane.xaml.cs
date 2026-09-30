@@ -83,8 +83,39 @@ public partial class TerminalPane : UserControl
         SetChannelState(ChannelState.Closed, running: false);
     }
 
-    /// <summary>Номер DLC; 0 — системный лог.</summary>
+    /// <summary>Номер DLC; 0 — системный лог; <see cref="PortDlci"/> — порт без MUX.</summary>
     public int Dlci { get; init; }
+
+    /// <summary>«Номер канала» вкладки порта в обычном AT-режиме.</summary>
+    public const int PortDlci = -1;
+
+    public bool IsPortPane => Dlci == PortDlci;
+
+    /// <summary>Основа имени файла при сохранении вкладки.</summary>
+    public string FileNameBase => Dlci == 0 ? "system-log" : IsPortPane ? "com-port" : $"dlc{Dlci}";
+
+    /// <summary>Состояние вкладки порта: открыт ли порт и не занят ли он MUX.</summary>
+    public void SetPortStatus(bool portOpen, bool inMux)
+    {
+        (Brush brush, string text) = (portOpen, inMux) switch
+        {
+            (true, false) => ((Brush)Brushes.SteelBlue, "порт открыт, AT-режим"),
+            (true, true) => (Brushes.Gold, "порт в режиме MUX — работайте во вкладках DLC"),
+            _ => (Brushes.Gray, "порт закрыт — «Открыть порт»"),
+        };
+        StateDot.Fill = brush;
+        StateText.Text = text;
+        OpenChannelButton.Visibility = Visibility.Collapsed; // портом управляют кнопки главного окна
+        CloseChannelButton.Visibility = Visibility.Collapsed;
+        RenameMenu.Visibility = Visibility.Collapsed;
+        RenameSeparator.Visibility = Visibility.Collapsed;
+        bool usable = portOpen && !inMux;
+        Input.IsEnabled = usable;
+        SendButton.IsEnabled = usable;
+        MacroBar.IsEnabled = usable;
+        SendFileButton.IsEnabled = usable;
+        _state = usable ? ChannelState.Open : ChannelState.Closed;
+    }
 
     /// <summary>Имя вкладки для «Копилки».</summary>
     public string SourceName { get; set; } = "";
@@ -468,6 +499,8 @@ public partial class TerminalPane : UserControl
 
     public void SetChannelState(ChannelState state, bool running)
     {
+        if (IsPortPane)
+            return; // состояние вкладки порта задаёт SetPortStatus
         _state = state;
         (Brush brush, string text) = state switch
         {

@@ -203,7 +203,7 @@ public partial class TerminalPane
         var dialog = new SaveFileDialog
         {
             Title = "Сохранить " + what,
-            FileName = $"{(Dlci == 0 ? "system-log" : $"dlc{Dlci}")}-{DateTime.Now:yyyyMMdd-HHmmss}.txt",
+            FileName = $"{FileNameBase}-{DateTime.Now:yyyyMMdd-HHmmss}.txt",
             Filter = "Текст (*.txt)|*.txt|Все файлы (*.*)|*.*",
         };
         if (dialog.ShowDialog(Window.GetWindow(this)) == true)

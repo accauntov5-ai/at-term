@@ -43,7 +43,9 @@ public sealed class MuxSession : IAsyncDisposable
     private static readonly TimeSpan FlowControlTimeout = TimeSpan.FromSeconds(10);
 
     private readonly Stream _stream;
-    private readonly MuxSessionOptions _options;
+    private MuxSessionOptions _options;
+    private CancellationTokenSource? _muxCts;
+    private bool _keepPortOpen;
     private readonly FrameParser _parser = new();
     private readonly SemaphoreSlim _writeLock = new(1, 1);
     private readonly ConcurrentDictionary<int, Channel> _channels = new();
@@ -66,9 +68,7 @@ public sealed class MuxSession : IAsyncDisposable
     {
         _stream = stream ?? throw new ArgumentNullException(nameof(stream));
         _options = options ?? throw new ArgumentNullException(nameof(options));
-        MaxFrameSize = options.MaxFrameSize;
-        // Заголовок с запасом: модемы иногда игнорируют N1 для служебных кадров.
-        _parser.MaxPayloadLength = Math.Max(MaxFrameSize, 127);
+        ApplyOptions(options);
         _parser.FrameReceived += OnFrameReceived;
         _parser.Error += OnParserError;
     }
@@ -85,7 +85,7 @@ public sealed class MuxSession : IAsyncDisposable
     public MuxSessionState State { get; private set; } = MuxSessionState.Idle;
     public string? TerminationReason { get; private set; }
     /// <summary>N1 — максимальный размер Payload исходящего кадра.</summary>
-    public int MaxFrameSize { get; }
+    public int MaxFrameSize { get; private set; }
     public bool IsMuxMode => _muxMode;
     public long RxFrames => Interlocked.Read(ref _rxFrames);
     public long TxFrames => Interlocked.Read(ref _txFrames);
@@ -96,21 +96,74 @@ public sealed class MuxSession : IAsyncDisposable
 
     // ───────────────────────────── Запуск ─────────────────────────────
 
-    public async Task StartAsync(CancellationToken cancellationToken = default)
+    private void ApplyOptions(MuxSessionOptions options)
+    {
+        _options = options;
+        MaxFrameSize = options.MaxFrameSize;
+        // Заголовок с запасом: модемы иногда игнорируют N1 для служебных кадров.
+        _parser.MaxPayloadLength = Math.Max(MaxFrameSize, 127);
+    }
+
+    /// <summary>
+    /// Открывает порт в обычном AT-режиме: принятые байты приходят в <see cref="RawTraffic"/>,
+    /// отправка — <see cref="SendRawAsync"/>. Мультиплексор затем запускается <see cref="StartAsync(CancellationToken)"/>,
+    /// а <see cref="StopMuxAsync"/> возвращает сюда же, не закрывая порт.
+    /// </summary>
+    public Task OpenAsync()
     {
         if (State != MuxSessionState.Idle)
+            throw new InvalidOperationException("Порт уже открыт");
+        _keepPortOpen = true;
+        _muxMode = false;
+        _readTask = Task.Run(ReadLoopAsync);
+        SetState(MuxSessionState.PortOpen);
+        Emit(LogLevel.Info, "Порт открыт, модем в AT-режиме");
+        return Task.CompletedTask;
+    }
+
+    /// <summary>Отправка в порт в AT-режиме (без мультиплексора).</summary>
+    public async Task SendRawAsync(byte[] data, CancellationToken ct = default)
+    {
+        if (State != MuxSessionState.PortOpen)
+            throw new InvalidOperationException(State == MuxSessionState.Running
+                ? "Порт в режиме MUX — используйте вкладки каналов"
+                : "Порт не открыт");
+        await WriteRawAsync(data, ct);
+    }
+
+    /// <summary>Запуск MUX с новыми параметрами (из открытого порта — можно менять команду и каналы).</summary>
+    public Task StartAsync(MuxSessionOptions options, CancellationToken cancellationToken = default)
+    {
+        if (State is not (MuxSessionState.Idle or MuxSessionState.PortOpen))
+            throw new InvalidOperationException("Мультиплексор уже запущен");
+        ApplyOptions(options);
+        return StartAsync(cancellationToken);
+    }
+
+    public async Task StartAsync(CancellationToken cancellationToken = default)
+    {
+        if (State is not (MuxSessionState.Idle or MuxSessionState.PortOpen))
             throw new InvalidOperationException("Сессия уже запускалась");
 
         var cmux = CmuxParameters.Parse(_options.CmuxCommand);
         if (!_options.SkipCmuxCommand && cmux.Mode != 0)
             throw new NotSupportedException("Поддерживается только Basic Option (AT+CMUX=0,...)");
 
+        bool fromPort = State == MuxSessionState.PortOpen;
         SetState(MuxSessionState.Initializing);
-        using var linked = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, _cts.Token);
+        _muxCts?.Dispose();
+        _muxCts = new CancellationTokenSource();
+        using var linked = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, _cts.Token, _muxCts.Token);
         var ct = linked.Token;
 
+        // Состояние предыдущего сеанса MUX (если порт был открыт и MUX уже запускался).
+        _channels.Clear();
+        _globalFlowOff = false;
+        _swallowLf = false;
+        _parser.Reset();
         _muxMode = _options.SkipCmuxCommand;
-        _readTask = Task.Run(ReadLoopAsync);
+        if (!fromPort)
+            _readTask = Task.Run(ReadLoopAsync);
 
         try
         {
@@ -147,13 +200,63 @@ public sealed class MuxSession : IAsyncDisposable
         }
         catch (Exception ex)
         {
-            if (ex is OperationCanceledException)
+            if (_keepPortOpen && !_cts.IsCancellationRequested)
+            {
+                // Порт жив — возвращаемся в AT-режим; если модем уже перешёл в MUX, закрываем его.
+                await ReturnToPortModeAsync(ex is OperationCanceledException ? "Запуск MUX отменён" : ex.Message, closeMux: _muxMode);
+            }
+            else if (ex is OperationCanceledException)
+            {
                 await ShutdownAsync(MuxSessionState.Stopped, "Запуск отменён");
+            }
             else
+            {
                 await ShutdownAsync(MuxSessionState.Faulted, ex.Message);
+            }
             throw;
         }
     }
+
+    /// <summary>Выход из MUX с сохранением открытого порта (при необходимости — с командами закрытия MUX).</summary>
+    private async Task ReturnToPortModeAsync(string reason, bool closeMux)
+    {
+        if (closeMux)
+        {
+            try
+            {
+                var close = new List<byte> { FrameConstants.Flag };
+                close.AddRange(FrameEncoder.Uih(0, ControlMessage.CloseDown().Encode()));
+                close.AddRange(FrameEncoder.Disc(0));
+                await WriteRawAsync(close.ToArray(), _cts.Token);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException || !_cts.IsCancellationRequested)
+            {
+                Emit(LogLevel.Warning, "Не удалось отправить закрытие MUX: " + ex.Message);
+            }
+        }
+        LeaveMuxState(reason);
+    }
+
+    /// <summary>Сбрасывает всё, что относится к MUX, и переводит сессию в «порт открыт».</summary>
+    private void LeaveMuxState(string reason)
+    {
+        _muxMode = false;
+        _swallowLf = false;
+        _parser.Reset();
+        _cldTcs?.TrySetResult(false);
+        foreach (var ch in _channels.Values)
+        {
+            ch.Pending?.TrySetCanceled();
+            if (ch.State != ChannelState.Closed)
+                SetChannelState(ch, ChannelState.Closed);
+        }
+        Emit(LogLevel.Info, reason);
+        SetState(MuxSessionState.PortOpen);
+    }
+
+    /// <summary>Модем сам закрыл MUX (CLD / DISC DLC0).</summary>
+    private Task OnModemClosedMuxAsync(string reason)
+        => _keepPortOpen ? Task.Run(() => LeaveMuxState(reason + ", порт остаётся открытым")) : ShutdownAsync(MuxSessionState.Stopped, reason);
 
     /// <summary>
     /// Модем молчит на AT — обычно он остался в режиме MUX после аварийного завершения программы
@@ -553,7 +656,7 @@ public sealed class MuxSession : IAsyncDisposable
             case FrameType.DISC:
                 Reply(new MuxFrame(frame.Dlci, FrameType.UA, false, true, Array.Empty<byte>()));
                 if (frame.Dlci == 0)
-                    _ = Task.Run(() => ShutdownAsync(MuxSessionState.Stopped, "Модем закрыл мультиплексор (DISC DLC0)"));
+                    _ = Task.Run(() => OnModemClosedMuxAsync("Модем закрыл мультиплексор (DISC DLC0)"));
                 else
                 {
                     SetChannelState(ch, ChannelState.Closed);
@@ -618,7 +721,7 @@ public sealed class MuxSession : IAsyncDisposable
                     _ = Task.Run(async () =>
                     {
                         await Task.Delay(100);
-                        await ShutdownAsync(MuxSessionState.Stopped, "Модем закрыл мультиплексор (CLD)");
+                        await OnModemClosedMuxAsync("Модем закрыл мультиплексор (CLD)");
                     });
                     break;
                 case ControlMessageType.Test:
@@ -640,14 +743,42 @@ public sealed class MuxSession : IAsyncDisposable
     // ───────────────────────────── Остановка ─────────────────────────────
 
     /// <summary>
-    /// Корректно закрывает мультиплексор: DISC для каналов данных, затем CLD (модем возвращается в AT-режим).
-    /// Поток (порт) не закрывается — это делает владелец.
+    /// Закрывает мультиплексор (DISC каналов, затем CLD), но оставляет порт открытым в AT-режиме.
+    /// Работает, только если сессия открыта через <see cref="OpenAsync"/>; иначе равносильна <see cref="StopAsync"/>.
+    /// </summary>
+    public async Task StopMuxAsync()
+    {
+        if (!_keepPortOpen)
+        {
+            await StopAsync();
+            return;
+        }
+        if (State == MuxSessionState.Initializing)
+        {
+            _muxCts?.Cancel(); // StartAsync сам вернётся в «порт открыт»
+            var deadline = DateTime.UtcNow.AddSeconds(5);
+            while (State == MuxSessionState.Initializing && DateTime.UtcNow < deadline)
+                await Task.Delay(20);
+            return;
+        }
+        if (State != MuxSessionState.Running)
+            return;
+
+        SetState(MuxSessionState.Stopping);
+        await CloseMuxProtocolAsync();
+        LeaveMuxState("MUX остановлен, модем в AT-режиме, порт открыт");
+    }
+
+    /// <summary>
+    /// Корректно закрывает мультиплексор и сессию целиком: DISC для каналов данных, затем CLD
+    /// (модем возвращается в AT-режим). Поток (порт) не закрывается — это делает владелец.
     /// </summary>
     public async Task StopAsync()
     {
-        if (State is MuxSessionState.Idle or MuxSessionState.Stopped or MuxSessionState.Faulted)
+        if (State is MuxSessionState.Idle or MuxSessionState.Stopped or MuxSessionState.Faulted or MuxSessionState.PortOpen)
         {
-            await ShutdownAsync(MuxSessionState.Stopped, "Сессия остановлена");
+            await ShutdownAsync(MuxSessionState.Stopped, State == MuxSessionState.PortOpen ? "Порт закрыт" : "Сессия остановлена");
+            await WaitReadLoopAsync();
             return;
         }
         if (State == MuxSessionState.Initializing)
@@ -660,6 +791,13 @@ public sealed class MuxSession : IAsyncDisposable
             return;
 
         SetState(MuxSessionState.Stopping);
+        await CloseMuxProtocolAsync();
+        await ShutdownAsync(MuxSessionState.Stopped, "Сессия остановлена");
+        await WaitReadLoopAsync();
+    }
+
+    private async Task CloseMuxProtocolAsync()
+    {
         try
         {
             using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(10));
@@ -683,9 +821,6 @@ public sealed class MuxSession : IAsyncDisposable
         {
             Emit(LogLevel.Warning, "Ошибка при закрытии MUX: " + ex.Message);
         }
-
-        await ShutdownAsync(MuxSessionState.Stopped, "Сессия остановлена");
-        await WaitReadLoopAsync();
     }
 
     private async Task WaitReadLoopAsync()
@@ -721,6 +856,7 @@ public sealed class MuxSession : IAsyncDisposable
     public async ValueTask DisposeAsync()
     {
         await StopAsync();
+        _muxCts?.Dispose();
         _cts.Dispose();
     }
 

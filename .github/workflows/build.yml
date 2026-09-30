@@ -1,9 +1,12 @@
 name: build
 
 on:
-  push:
+  push:            # ветки и теги; тег v* дополнительно публикует релиз
   pull_request:
   workflow_dispatch:
+
+permissions:
+  contents: write  # для публикации релиза по тегу
 
 jobs:
   build:
@@ -20,7 +23,12 @@ jobs:
           dotnet-version: 8.0.x
 
       - name: Build
-        run: dotnet build MuxTerminal.sln -c Release
+        shell: pwsh
+        run: |
+          # Для тега v1.2.3 версия программы — 1.2.3.
+          $version = if ("${{ github.ref_type }}" -eq "tag") { "${{ github.ref_name }}".TrimStart('v') } else { "" }
+          if ($version) { dotnet build MuxTerminal.sln -c Release -p:Version=$version } else { dotnet build MuxTerminal.sln -c Release }
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Test (net8.0 + net48)
         run: dotnet test tests/MuxTerminal.Core.Tests -c Release --no-build
@@ -35,11 +43,25 @@ jobs:
           & $signtool.FullName sign /f $pfx /p $env:SIGN_PASSWORD /fd sha256 /tr http://timestamp.digicert.com /td sha256 /d "GSM 07.10 MUX Terminal" src/MuxTerminal.App/bin/Release/net48/MuxTerminal.exe
           Remove-Item $pfx
 
+      - name: Package
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force dist | Out-Null
+          Copy-Item src/MuxTerminal.App/bin/Release/net48/MuxTerminal.exe dist/
+          Copy-Item LICENSE, THIRD-PARTY-NOTICES.txt dist/
+          Compress-Archive -Force -Path dist/* -DestinationPath MuxTerminal.zip
+
       - uses: actions/upload-artifact@v4
         with:
           name: MuxTerminal-exe
-          path: |
-            src/MuxTerminal.App/bin/Release/net48/MuxTerminal.exe
-            src/MuxTerminal.App/bin/Release/net48/MuxTerminal.exe.config
-            LICENSE
-            THIRD-PARTY-NOTICES.txt
+          path: dist/
+
+      - name: GitHub Release
+        if: github.ref_type == 'tag' && startsWith(github.ref_name, 'v')
+        uses: softprops/action-gh-release@v2
+        with:
+          name: GSM 07.10 MUX Terminal ${{ github.ref_name }}
+          body_path: docs/release-notes.md
+          files: |
+            dist/MuxTerminal.exe
+            MuxTerminal.zip

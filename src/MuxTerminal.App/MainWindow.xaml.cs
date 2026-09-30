@@ -32,6 +32,9 @@ public partial class MainWindow : Window
     private readonly AppSettings _settings = AppSettings.Load();
     private readonly TerminalPane _logPane;
     private LayoutDocument _logDoc;
+    // Вкладка «COM-порт»: обычный терминал, пока модем не в MUX.
+    private readonly TerminalPane _portPane;
+    private LayoutDocument _portDoc;
     // Доступ из фонового потока сессии (маршрутизация данных) — поэтому ConcurrentDictionary.
     private readonly ConcurrentDictionary<int, ChannelView> _channels = new();
     private readonly DispatcherTimer _statusTimer;
@@ -61,6 +64,13 @@ public partial class MainWindow : Window
             "Служебный лог: сырые MUX-кадры (HEX), канал управления DLC0, ошибки FCS");
         _logPane.LayoutCommandRequested += OnPaneLayoutCommand;
         _logPane.Collected += OnCollected;
+
+        _portPane = new TerminalPane { Dlci = TerminalPane.PortDlci, SourceName = "COM-порт" };
+        _portDoc = CreateDocument("COM-порт · AT", "port", _portPane,
+            "Порт в обычном режиме (без MUX): AT-команды напрямую модему. Во время работы MUX ввод отключён");
+        _portPane.SendHandler = SendToPortAsync;
+        _portPane.LayoutCommandRequested += OnPaneLayoutCommand;
+        _portPane.Collected += OnCollected;
 
         _collectorDoc = CreateDocument("Копилка", "collector", _collector,
             "Все строки, совпавшие с правилами поиска (меню «Настройки», «Отображение и подсветка»)");
@@ -175,6 +185,8 @@ public partial class MainWindow : Window
             doc.Title = old.Title;
             if (old == _logDoc)
                 _logDoc = doc;
+            else if (old == _portDoc)
+                _portDoc = doc;
             else if (old == _collectorDoc)
                 _collectorDoc = doc;
             else if (doc.Content is TerminalPane pane && _channels.TryGetValue(pane.Dlci, out var view))
@@ -206,6 +218,7 @@ public partial class MainWindow : Window
         RefreshProfiles(_settings.LastProfile);
 
         var pane = MainDocumentPane();
+        pane.Children.Add(_portDoc);
         pane.Children.Add(_logDoc);
         pane.Children.Add(_collectorDoc);
         ApplyDisplay(_settings.Display);
@@ -337,10 +350,10 @@ public partial class MainWindow : Window
     };
 
     private IEnumerable<LayoutDocument> AllDocuments()
-        => new[] { _logDoc }.Concat(_channels.Values.OrderBy(c => c.Dlci).Select(c => c.Doc)).Concat(new[] { _collectorDoc });
+        => new[] { _portDoc, _logDoc }.Concat(_channels.Values.OrderBy(c => c.Dlci).Select(c => c.Doc)).Concat(new[] { _collectorDoc });
 
     private IEnumerable<TerminalPane> AllPanes()
-        => new[] { _logPane }.Concat(_channels.Values.Select(c => c.Pane));
+        => new[] { _portPane, _logPane }.Concat(_channels.Values.Select(c => c.Pane));
 
     // ───────────────────────────── Оформление и «Копилка» ─────────────────────────────
 
@@ -373,7 +386,9 @@ public partial class MainWindow : Window
 
     private void NavigateTo(CollectedEntry entry)
     {
-        var doc = entry.Dlci == 0 ? _logDoc : _channels.TryGetValue(entry.Dlci, out var view) ? view.Doc : null;
+        var doc = entry.Dlci == 0 ? _logDoc
+            : entry.Dlci == TerminalPane.PortDlci ? _portDoc
+            : _channels.TryGetValue(entry.Dlci, out var view) ? view.Doc : null;
         if (doc is not null)
             doc.IsActive = true;
     }
@@ -591,7 +606,8 @@ public partial class MainWindow : Window
     private sealed record ConnectParams(
         string Port, int Baud, bool RtsCts, bool Dtr, string Cmux, bool SkipCmux, List<int> Channels, int? SwitchBaud);
 
-    private bool TryReadConnectParams(out ConnectParams p)
+    /// <param name="forMux">true — проверить и параметры MUX (команда, каналы, скорость port_speed).</param>
+    private bool TryReadConnectParams(bool forMux, out ConnectParams p)
     {
         p = null!;
         string port = PortCombo.Text.Trim();
@@ -605,57 +621,94 @@ public partial class MainWindow : Window
             MessageBox.Show(this, "Некорректная скорость порта.", Title, MessageBoxButton.OK, MessageBoxImage.Warning);
             return false;
         }
-        if (!TryParseChannels(ChannelsBox.Text, out var channels, out var error))
-        {
-            MessageBox.Show(this, error, Title, MessageBoxButton.OK, MessageBoxImage.Warning);
-            return false;
-        }
         string cmux = CmuxCombo.Text.Trim();
         bool skip = SkipCmuxCheck.IsChecked == true;
-        var cmuxParams = CmuxParameters.Parse(cmux);
-        if (!skip && cmuxParams.Mode != 0)
+        if (!TryParseChannels(ChannelsBox.Text, out var channels, out var error))
         {
-            MessageBox.Show(this, "Поддерживается только базовый режим: AT+CMUX=0,…", Title, MessageBoxButton.OK, MessageBoxImage.Warning);
-            return false;
+            if (forMux)
+            {
+                MessageBox.Show(this, error, Title, MessageBoxButton.OK, MessageBoxImage.Warning);
+                return false;
+            }
+            channels = new List<int>();
         }
 
-        // В AT+CMUX указана другая скорость: модем переключится на неё сразу после OK.
         int? switchBaud = null;
-        if (!skip && port != EmulatorPort && cmuxParams.PortBaudRate is { } newBaud && newBaud != baud)
+        if (forMux)
         {
-            var answer = MessageBox.Show(this,
-                $"В команде указана скорость порта {newBaud} (параметр port_speed), а порт открывается на {baud}.\n" +
-                $"После ответа OK модем переключится на {newBaud}, и без переключения порта связь пропадёт.\n\n" +
-                $"Да — переключить порт на {newBaud} автоматически после OK\n" +
-                "Нет — не переключать (модем не меняет скорость)\n" +
-                "Отмена — исправить параметры",
-                "Скорость порта", MessageBoxButton.YesNoCancel, MessageBoxImage.Question);
-            if (answer == MessageBoxResult.Cancel)
+            var cmuxParams = CmuxParameters.Parse(cmux);
+            if (!skip && cmuxParams.Mode != 0)
+            {
+                MessageBox.Show(this, "Поддерживается только базовый режим: AT+CMUX=0,…", Title, MessageBoxButton.OK, MessageBoxImage.Warning);
                 return false;
-            if (answer == MessageBoxResult.Yes)
-                switchBaud = newBaud;
+            }
+
+            // В AT+CMUX указана другая скорость: модем переключится на неё сразу после OK.
+            if (!skip && port != EmulatorPort && cmuxParams.PortBaudRate is { } newBaud && newBaud != baud)
+            {
+                var answer = MessageBox.Show(this,
+                    $"В команде указана скорость порта {newBaud} (параметр port_speed), а порт открывается на {baud}.\n" +
+                    $"После ответа OK модем переключится на {newBaud}, и без переключения порта связь пропадёт.\n\n" +
+                    $"Да — переключить порт на {newBaud} автоматически после OK\n" +
+                    "Нет — не переключать (модем не меняет скорость)\n" +
+                    "Отмена — исправить параметры",
+                    "Скорость порта", MessageBoxButton.YesNoCancel, MessageBoxImage.Question);
+                if (answer == MessageBoxResult.Cancel)
+                    return false;
+                if (answer == MessageBoxResult.Yes)
+                    switchBaud = newBaud;
+            }
         }
 
         p = new ConnectParams(port, baud, RtsCtsCheck.IsChecked == true, DtrCheck.IsChecked == true, cmux, skip, channels, switchBaud);
         return true;
     }
 
-    private async void Start_Click(object sender, RoutedEventArgs e)
+    /// <summary>Нужен ли MUX (для переподключения): «Старт MUX» — да, «Открыть порт» / «Стоп MUX» — нет.</summary>
+    private bool _wantMux;
+
+    private async void OpenPort_Click(object sender, RoutedEventArgs e)
     {
         if (_session is not null || _reconnectCts is not null)
             return;
-        if (!TryReadConnectParams(out var p))
+        if (!TryReadConnectParams(forMux: false, out var p))
             return;
         SaveSettings();
-        await ConnectAsync(p, interactive: true);
+        _wantMux = false;
+        if (await OpenPortAsync(p, interactive: true))
+            _portDoc.IsActive = true;
     }
 
-    /// <summary>Открывает порт и запускает MUX. Возвращает true, если сеанс работает.</summary>
-    private async Task<bool> ConnectAsync(ConnectParams p, bool interactive)
+    private async void Start_Click(object sender, RoutedEventArgs e)
     {
-        foreach (var dlci in p.Channels)
-            EnsureChannel(dlci);
+        if (_reconnectCts is not null || (_session is not null && _session.State != MuxSessionState.PortOpen))
+            return;
+        if (!TryReadConnectParams(forMux: true, out var p))
+            return;
+        SaveSettings();
+        _wantMux = true;
+        await StartMuxAsync(p, interactive: true);
+    }
 
+    private MuxSessionOptions BuildOptions(ConnectParams p, IMuxTransport transport) => new()
+    {
+        CmuxCommand = p.Cmux,
+        SkipCmuxCommand = p.SkipCmux,
+        Channels = p.Channels,
+        OnMuxEntered = p.SwitchBaud is { } newBaud && transport is SerialPortTransport serial
+            ? _ =>
+            {
+                serial.SetBaudRate(newBaud);
+                _logPane.AppendInfo($"Порт переключён на {newBaud} вслед за модемом");
+                _logger?.System(LogLevel.Info, $"Порт переключён на {newBaud}");
+                return Task.CompletedTask;
+            }
+            : null,
+    };
+
+    /// <summary>Открывает порт в обычном AT-режиме (вкладка «COM-порт»). Возвращает true при успехе.</summary>
+    private async Task<bool> OpenPortAsync(ConnectParams p, bool interactive)
+    {
         IMuxTransport transport;
         try
         {
@@ -683,9 +736,7 @@ public partial class MainWindow : Window
             try
             {
                 _logger = new SessionLogger(
-                    AppInfo.Diagnostics +
-                    $"Порт: {transport.Name}, RTS/CTS: {p.RtsCts}, DTR: {p.Dtr}\r\n" +
-                    $"Команда: {(p.SkipCmux ? "(модем уже в MUX)" : p.Cmux)}, каналы: {string.Join(",", p.Channels)}",
+                    AppInfo.Diagnostics + $"Порт: {transport.Name}, RTS/CTS: {p.RtsCts}, DTR: {p.Dtr}",
                     _settings.SessionLogRawFrames);
             }
             catch (Exception ex)
@@ -694,51 +745,56 @@ public partial class MainWindow : Window
             }
         }
 
-        _logPane.AppendInfo($"==== Подключение: {transport.Name} ====");
-        var session = new MuxSession(transport.Stream, new MuxSessionOptions
-        {
-            CmuxCommand = p.Cmux,
-            SkipCmuxCommand = p.SkipCmux,
-            Channels = p.Channels,
-            OnMuxEntered = p.SwitchBaud is { } newBaud && transport is SerialPortTransport serial
-                ? _ =>
-                {
-                    serial.SetBaudRate(newBaud);
-                    _logPane.AppendInfo($"Порт переключён на {newBaud} вслед за модемом");
-                    _logger?.System(LogLevel.Info, $"Порт переключён на {newBaud}");
-                    return Task.CompletedTask;
-                }
-                : null,
-        });
+        _logPane.AppendInfo($"==== Порт открыт: {transport.Name} ====");
+        _portPane.AppendInfo($"порт {transport.Name} открыт — модем в обычном AT-режиме");
+        var session = new MuxSession(transport.Stream, BuildOptions(p, transport));
         _session = session;
         _lastConnect = p;
         Wire(session);
+        await session.OpenAsync();
+        UpdateUi();
+        return true;
+    }
+
+    /// <summary>Запускает MUX (при необходимости сначала открывает порт). Возвращает true, если MUX работает.</summary>
+    private async Task<bool> StartMuxAsync(ConnectParams p, bool interactive)
+    {
+        foreach (var dlci in p.Channels)
+            EnsureChannel(dlci);
+        if (_session is null && !await OpenPortAsync(p, interactive))
+            return false;
+
+        var session = _session!;
+        _lastConnect = p;
+        _logger?.System(LogLevel.Info, $"Старт MUX: {(p.SkipCmux ? "(модем уже в MUX)" : p.Cmux)}, каналы: {string.Join(",", p.Channels)}");
         _startCts = new CancellationTokenSource();
+        _starting = true;
         UpdateUi();
 
         bool ok = false;
-        _starting = true;
         try
         {
-            await session.StartAsync(_startCts.Token);
+            await session.StartAsync(BuildOptions(p, _transport!), _startCts.Token);
             ok = true;
             _logPane.AppendInfo($"MUX запущен. Открыто каналов: {p.Channels.Count(d => session.GetChannelState(d) == ChannelState.Open)} из {p.Channels.Count}");
         }
         catch (OperationCanceledException)
         {
-            await CleanupAsync(session);
+            // Отменили «Стопом» — порт остаётся открытым.
         }
         catch (Exception ex)
         {
-            await CleanupAsync(session);
             if (interactive)
-                MessageBox.Show(this, ex.Message, "Ошибка запуска MUX", MessageBoxButton.OK, MessageBoxImage.Error);
+                MessageBox.Show(this, ex.Message + (session.State == MuxSessionState.PortOpen ? "\n\nПорт остаётся открытым — можно проверить модем на вкладке «COM-порт»." : ""),
+                    "Ошибка запуска MUX", MessageBoxButton.OK, MessageBoxImage.Error);
         }
         finally
         {
             _starting = false;
+            _startCts?.Dispose();
+            _startCts = null;
         }
-        // Модем мог закрыть сессию прямо во время запуска.
+        // Порт пропал во время запуска (или модем закрыл сессию) — освобождаем.
         if (_session is { State: MuxSessionState.Stopped or MuxSessionState.Faulted } ended)
         {
             ok = false;
@@ -771,11 +827,14 @@ public partial class MainWindow : Window
                 _reconnectStatus = $"Переподключение (попытка {attempt})…";
                 UpdateUi();
                 _logPane.AppendInfo($"Переподключение, попытка {attempt}");
-                if (await ConnectAsync(p, interactive: false))
+                bool ok = _wantMux ? await StartMuxAsync(p, interactive: false) : await OpenPortAsync(p, interactive: false);
+                if (ok)
                 {
                     ShowHint($"Связь восстановлена (попытка {attempt})", error: false);
                     break;
                 }
+                if (_session is not null)
+                    await ClosePortAsync(); // порт открылся, но MUX не запустился — пробуем заново с нуля
             }
         }
         finally
@@ -787,13 +846,38 @@ public partial class MainWindow : Window
         }
     }
 
+    /// <summary>«Стоп MUX»: закрыть мультиплексор, порт остаётся открытым в AT-режиме.</summary>
     private async void Stop_Click(object sender, RoutedEventArgs e)
     {
-        _reconnectCts?.Cancel(); // «Стоп» прекращает и попытки переподключения
-        await StopAsync();
+        _reconnectCts?.Cancel();
+        _wantMux = false;
+        var session = _session;
+        if (session is null || _stopping)
+            return;
+        _stopping = true;
+        UpdateUi();
+        try
+        {
+            await session.StopMuxAsync();
+        }
+        finally
+        {
+            _stopping = false;
+            if (_session is { State: MuxSessionState.Stopped or MuxSessionState.Faulted } ended)
+                await CleanupAsync(ended);
+            UpdateUi();
+        }
     }
 
-    private async Task StopAsync()
+    private async void ClosePort_Click(object sender, RoutedEventArgs e)
+    {
+        _reconnectCts?.Cancel(); // прекращает и попытки переподключения
+        _wantMux = false;
+        await ClosePortAsync();
+    }
+
+    /// <summary>Закрывает MUX (если работает) и порт.</summary>
+    private async Task ClosePortAsync()
     {
         var session = _session;
         if (session is null || _stopping)
@@ -907,6 +991,8 @@ public partial class MainWindow : Window
     {
         _logPane.Append(dir == TrafficDirection.Rx ? ChunkKind.Rx : ChunkKind.Tx, data, "AT-режим: " + Hex.ToPrintable(data, 256));
         _logger?.Data("AT", dir, data);
+        if (dir == TrafficDirection.Rx)
+            _portPane.Append(ChunkKind.Rx, data); // отправленное вкладка показывает сама
     }
 
     private void OnDataReceived(int dlci, byte[] data)
@@ -957,6 +1043,12 @@ public partial class MainWindow : Window
             return;
         view.Pane.SetChannelState(state, _session?.State == MuxSessionState.Running);
         view.Doc.Title = ChannelTitle(dlci, state);
+    }
+
+    private async Task SendToPortAsync(byte[] data)
+    {
+        var session = _session ?? throw new InvalidOperationException("Порт не открыт — нажмите «Открыть порт»");
+        await session.SendRawAsync(data);
     }
 
     private async Task SendToChannelAsync(int dlci, byte[] data)
@@ -1013,15 +1105,22 @@ public partial class MainWindow : Window
     private void UpdateUi()
     {
         var state = _session?.State ?? MuxSessionState.Idle;
-        bool connected = _session is not null;
+        bool portOpen = _session is not null;
         bool running = state == MuxSessionState.Running;
-
+        bool inMux = state is MuxSessionState.Initializing or MuxSessionState.Running or MuxSessionState.Stopping;
         bool reconnecting = _reconnectCts is not null;
-        StartButton.IsEnabled = !connected && !reconnecting;
-        StopButton.IsEnabled = (connected && !_stopping) || reconnecting;
+
+        OpenPortButton.IsEnabled = !portOpen && !reconnecting;
+        ClosePortButton.IsEnabled = (portOpen && !_stopping) || reconnecting;
+        StartButton.IsEnabled = (!portOpen || state == MuxSessionState.PortOpen) && !reconnecting && !_starting;
+        StopButton.IsEnabled = inMux && !_stopping;
         AddChannelButton.IsEnabled = running;
-        foreach (var c in new Control[] { PortCombo, BaudCombo, RtsCtsCheck, DtrCheck, CmuxCombo, SkipCmuxCheck, ChannelsBox, ProfileCombo })
-            c.IsEnabled = !connected && !reconnecting;
+        // Параметры порта — пока порт закрыт; параметры MUX — пока MUX не запущен.
+        foreach (var c in new Control[] { PortCombo, BaudCombo, RtsCtsCheck, DtrCheck, ProfileCombo })
+            c.IsEnabled = !portOpen && !reconnecting;
+        foreach (var c in new Control[] { CmuxCombo, SkipCmuxCheck, ChannelsBox })
+            c.IsEnabled = !inMux && !reconnecting;
+        _portPane.SetPortStatus(portOpen, inMux);
 
         foreach (var ch in _channels.Values)
             ch.Pane.SetChannelState(ch.Pane.ChannelState, running);
@@ -1031,6 +1130,7 @@ public partial class MainWindow : Window
             MuxSessionState.Initializing => ((Brush)Brushes.Gold, "Инициализация MUX…"),
             MuxSessionState.Running => (Brushes.LimeGreen, $"MUX работает · {_transport?.Name} · N1={_session!.MaxFrameSize}"),
             MuxSessionState.Stopping => (Brushes.Gold, "Остановка…"),
+            MuxSessionState.PortOpen => (Brushes.SteelBlue, $"Порт открыт (AT-режим, без MUX) · {_transport?.Name}"),
             _ when _reconnectStatus is not null => (Brushes.OrangeRed, _reconnectStatus),
             _ => (Brushes.Gray, "Не подключено"),
         };
@@ -1197,7 +1297,7 @@ public partial class MainWindow : Window
         var dialog = new SaveFileDialog
         {
             Title = "Сохранить содержимое вкладки",
-            FileName = $"{(pane.Dlci == 0 ? "system-log" : $"dlc{pane.Dlci}")}-{DateTime.Now:yyyyMMdd-HHmmss}.txt",
+            FileName = $"{pane.FileNameBase}-{DateTime.Now:yyyyMMdd-HHmmss}.txt",
             Filter = "Текст (*.txt)|*.txt|Все файлы (*.*)|*.*",
         };
         if (dialog.ShowDialog(this) == true)
@@ -1223,7 +1323,7 @@ public partial class MainWindow : Window
         if (_closeRequested)
             return;
         _closeRequested = true;
-        await StopAsync();
+        await ClosePortAsync();
         await Dispatcher.BeginInvoke(Close);
     }
 }

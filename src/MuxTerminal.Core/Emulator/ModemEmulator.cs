@@ -244,7 +244,15 @@ public sealed class ModemEmulator : IAsyncDisposable
         foreach (var msg in ControlMessage.ParseAll(payload))
         {
             if (!msg.IsCommand)
+            {
+                // Модем сам закрывал MUX (CLD) — получив ответ терминала, возвращается в AT-режим.
+                if (msg.Type == ControlMessageType.CLD)
+                {
+                    LeaveMux();
+                    return;
+                }
                 continue;
+            }
             switch (msg.Type)
             {
                 case ControlMessageType.CLD when !Quirks.SupportsCld:

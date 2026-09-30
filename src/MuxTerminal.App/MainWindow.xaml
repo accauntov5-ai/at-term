@@ -83,8 +83,14 @@
                     <TextBox x:Name="ChannelsBox" Width="70" VerticalContentAlignment="Center" ToolTip="Номера DLC через запятую (1..61)" />
                 </StackPanel>
                 <StackPanel Orientation="Horizontal" Margin="8,2,0,2">
-                    <Button x:Name="StartButton" Content="Старт MUX" Padding="12,3" Click="Start_Click" FontWeight="SemiBold" />
-                    <Button x:Name="StopButton" Content="Стоп MUX" Padding="12,3" Margin="6,0,0,0" Click="Stop_Click" IsEnabled="False" />
+                    <Button x:Name="OpenPortButton" Content="Открыть порт" Padding="10,3" Click="OpenPort_Click"
+                            ToolTip="Открыть порт без MUX: обычный AT-терминал на вкладке «COM-порт»" />
+                    <Button x:Name="ClosePortButton" Content="Закрыть порт" Padding="10,3" Margin="4,0,12,0" Click="ClosePort_Click" IsEnabled="False"
+                            ToolTip="Закрыть MUX (если запущен) и порт" />
+                    <Button x:Name="StartButton" Content="Старт MUX" Padding="12,3" Click="Start_Click" FontWeight="SemiBold"
+                            ToolTip="Перевести модем в MUX и открыть каналы (порт откроется сам, если закрыт)" />
+                    <Button x:Name="StopButton" Content="Стоп MUX" Padding="12,3" Margin="6,0,0,0" Click="Stop_Click" IsEnabled="False"
+                            ToolTip="Закрыть MUX; порт остаётся открытым, модем — в AT-режиме" />
                     <CheckBox x:Name="AutoReconnectCheck" Content="Переподключаться" VerticalAlignment="Center" Margin="8,0,0,0"
                               ToolTip="Если связь с модемом потеряна (порт пропал, модем перезагрузился) — подключаться снова каждые 5 секунд" />
                     <TextBlock Style="{StaticResource Label}" Text="DLC:" Margin="16,0,4,0" />

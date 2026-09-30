@@ -3,6 +3,8 @@ namespace MuxTerminal.Core.Session;
 public enum MuxSessionState
 {
     Idle,
+    /// <summary>Порт открыт, модем в обычном AT-режиме (терминал без мультиплексора).</summary>
+    PortOpen,
     Initializing,
     Running,
     Stopping,
