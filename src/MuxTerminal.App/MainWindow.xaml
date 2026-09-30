@@ -78,7 +78,7 @@
                         <ComboBoxItem Content="AT+CMUX=0,0,5,31,10,3,30,10,2" />
                     </ComboBox>
                     <CheckBox x:Name="SkipCmuxCheck" Content="Модем уже в MUX" VerticalAlignment="Center" Margin="8,0,0,0"
-                              ToolTip="Не отправлять AT+CMUX, сразу открывать DLC0" />
+                              ToolTip="Модем уже в MUX, каналы открыты заранее: ничего не отправлять (ни AT+CMUX, ни SABM/MSC), только раскладывать кадры по вкладкам. «Стоп MUX» просто отключается, MUX модема не выключает." />
                     <TextBlock Style="{StaticResource Label}" Text="Каналы:" />
                     <TextBox x:Name="ChannelsBox" Width="70" VerticalContentAlignment="Center" ToolTip="Номера DLC через запятую (1..61)" />
                 </StackPanel>

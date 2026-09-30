@@ -55,6 +55,11 @@ public sealed class MuxSession : IAsyncDisposable
 
     private Task? _readTask;
     private volatile bool _muxMode;
+    /// <summary>
+    /// «Модем уже в MUX»: мы лишь подключились к работающему мультиплексору. Никаких служебных команд
+    /// от себя (SABM, DISC, MSC, CLD) — только разбор кадров, данные в каналы и ответы на команды модема.
+    /// </summary>
+    private volatile bool _attached;
     /// <summary>OK пришёл с «\r», а «\n» ещё в пути — первый байт MUX-потока может быть этим «\n».</summary>
     private bool _swallowLf;
     private volatile bool _globalFlowOff;
@@ -87,6 +92,8 @@ public sealed class MuxSession : IAsyncDisposable
     /// <summary>N1 — максимальный размер Payload исходящего кадра.</summary>
     public int MaxFrameSize { get; private set; }
     public bool IsMuxMode => _muxMode;
+    /// <summary>Подключены к уже работающему MUX (см. <see cref="MuxSessionOptions.SkipCmuxCommand"/>).</summary>
+    public bool IsAttached => _attached;
     public long RxFrames => Interlocked.Read(ref _rxFrames);
     public long TxFrames => Interlocked.Read(ref _txFrames);
     public long Errors => Interlocked.Read(ref _errors);
@@ -162,33 +169,43 @@ public sealed class MuxSession : IAsyncDisposable
         _swallowLf = false;
         _parser.Reset();
         _muxMode = _options.SkipCmuxCommand;
+        _attached = _options.SkipCmuxCommand;
         if (!fromPort)
             _readTask = Task.Run(ReadLoopAsync);
 
         try
         {
-            if (!_options.SkipCmuxCommand)
+            if (_attached)
             {
-                if (_options.SendAtProbe)
-                {
-                    bool alive = false;
-                    for (int i = 0; i < 3 && !alive; i++)
-                        alive = (await SendAtCommandAsync("AT", false, TimeSpan.FromSeconds(1), ct)).IsOk;
-                    if (!alive && _options.RecoverStuckMux)
-                        alive = await TryRecoverFromStuckMuxAsync(ct);
-                    if (!alive)
-                        Emit(LogLevel.Warning, "Модем не ответил OK на \"AT\" — пробую AT+CMUX всё равно");
-                }
-
-                var response = await SendAtCommandAsync(_options.CmuxCommand, true, _options.AtTimeout, ct);
-                if (!response.IsOk)
-                    throw new MuxException($"Модем не перешёл в MUX: ответ на {_options.CmuxCommand} — {response}");
-
-                Emit(LogLevel.Info, $"Модем в режиме MUX, N1={MaxFrameSize}");
-                if (_options.OnMuxEntered is { } hook)
-                    await hook(ct); // например, переключить скорость порта вслед за модемом
-                await Task.Delay(_options.SwitchDelay, ct);
+                // Модем уже в MUX, каналы открыты до нас: ничего не отправляем, просто раскладываем кадры.
+                // SABM здесь вреден: модем, у которого канал уже открыт, может не ответить, и запуск «провалится».
+                SetChannelState(GetChannel(0), ChannelState.Open);
+                foreach (int dlci in _options.Channels.Distinct().Where(d => d is > 0 and <= FrameConstants.MaxDlci))
+                    SetChannelState(GetChannel(dlci), ChannelState.Open);
+                Emit(LogLevel.Info, $"Подключение к работающему MUX (AT+CMUX, SABM и MSC не отправляются), N1={MaxFrameSize}");
+                SetState(MuxSessionState.Running);
+                return;
             }
+
+            if (_options.SendAtProbe)
+            {
+                bool alive = false;
+                for (int i = 0; i < 3 && !alive; i++)
+                    alive = (await SendAtCommandAsync("AT", false, TimeSpan.FromSeconds(1), ct)).IsOk;
+                if (!alive && _options.RecoverStuckMux)
+                    alive = await TryRecoverFromStuckMuxAsync(ct);
+                if (!alive)
+                    Emit(LogLevel.Warning, "Модем не ответил OK на \"AT\" — пробую AT+CMUX всё равно");
+            }
+
+            var response = await SendAtCommandAsync(_options.CmuxCommand, true, _options.AtTimeout, ct);
+            if (!response.IsOk)
+                throw new MuxException($"Модем не перешёл в MUX: ответ на {_options.CmuxCommand} — {response}");
+
+            Emit(LogLevel.Info, $"Модем в режиме MUX, N1={MaxFrameSize}");
+            if (_options.OnMuxEntered is { } hook)
+                await hook(ct); // например, переключить скорость порта вслед за модемом
+            await Task.Delay(_options.SwitchDelay, ct);
 
             if (!await OpenChannelCoreAsync(0, ct))
                 throw new MuxException("Канал управления DLC0 не открыт: модем не ответил UA на SABM");
@@ -203,7 +220,7 @@ public sealed class MuxSession : IAsyncDisposable
             if (_keepPortOpen && !_cts.IsCancellationRequested)
             {
                 // Порт жив — возвращаемся в AT-режим; если модем уже перешёл в MUX, закрываем его.
-                await ReturnToPortModeAsync(ex is OperationCanceledException ? "Запуск MUX отменён" : ex.Message, closeMux: _muxMode);
+                await ReturnToPortModeAsync(ex is OperationCanceledException ? "Запуск MUX отменён" : ex.Message, closeMux: _muxMode && !_attached);
             }
             else if (ex is OperationCanceledException)
             {
@@ -241,6 +258,7 @@ public sealed class MuxSession : IAsyncDisposable
     private void LeaveMuxState(string reason)
     {
         _muxMode = false;
+        _attached = false;
         _swallowLf = false;
         _parser.Reset();
         _cldTcs?.TrySetResult(false);
@@ -351,6 +369,12 @@ public sealed class MuxSession : IAsyncDisposable
     {
         if (dlci is < 1 or > FrameConstants.MaxDlci)
             throw new ArgumentOutOfRangeException(nameof(dlci), "Каналы данных: 1..61");
+        if (_attached)
+        {
+            // Каналами управляет тот, кто включил MUX: мы только начинаем слушать/писать в канал.
+            SetChannelState(GetChannel(dlci), ChannelState.Open);
+            return true;
+        }
         if (!await OpenChannelCoreAsync(dlci, ct))
             return false;
         if (_options.SendMscOnOpen)
@@ -381,6 +405,11 @@ public sealed class MuxSession : IAsyncDisposable
     {
         if (dlci is < 1 or > FrameConstants.MaxDlci)
             throw new ArgumentOutOfRangeException(nameof(dlci));
+        if (_attached)
+        {
+            SetChannelState(GetChannel(dlci), ChannelState.Closed); // без DISC: канал модема не трогаем
+            return;
+        }
         await CloseChannelCoreAsync(dlci, _options.Retries, ct);
     }
 
@@ -671,7 +700,16 @@ public sealed class MuxSession : IAsyncDisposable
                 else
                 {
                     if (ch.State != ChannelState.Open)
-                        Emit(LogLevel.Warning, $"Данные для неоткрытого DLC{frame.Dlci}");
+                    {
+                        if (_attached && ch.Pending is null)
+                        {
+                            // Модем шлёт данные — значит, канал у него открыт.
+                            SetChannelState(ch, ChannelState.Open);
+                            Emit(LogLevel.Info, $"DLC{frame.Dlci}: данные от модема — канал считается открытым");
+                        }
+                        else
+                            Emit(LogLevel.Warning, $"Данные для неоткрытого DLC{frame.Dlci}");
+                    }
                     if (frame.Payload.Length > 0)
                         DataReceived?.Invoke(frame.Dlci, frame.Payload);
                 }
@@ -765,6 +803,11 @@ public sealed class MuxSession : IAsyncDisposable
             return;
 
         SetState(MuxSessionState.Stopping);
+        if (_attached)
+        {
+            LeaveMuxState("Отключились от MUX (модем остаётся в MUX — его включали не мы), порт открыт");
+            return;
+        }
         await CloseMuxProtocolAsync();
         LeaveMuxState("MUX остановлен, модем в AT-режиме, порт открыт");
     }
@@ -791,8 +834,9 @@ public sealed class MuxSession : IAsyncDisposable
             return;
 
         SetState(MuxSessionState.Stopping);
-        await CloseMuxProtocolAsync();
-        await ShutdownAsync(MuxSessionState.Stopped, "Сессия остановлена");
+        if (!_attached)
+            await CloseMuxProtocolAsync();
+        await ShutdownAsync(MuxSessionState.Stopped, _attached ? "Отключились от MUX (модем остаётся в MUX)" : "Сессия остановлена");
         await WaitReadLoopAsync();
     }
 

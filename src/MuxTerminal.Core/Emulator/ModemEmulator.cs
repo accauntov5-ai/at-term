@@ -366,6 +366,20 @@ public sealed class ModemEmulator : IAsyncDisposable
 
     // ───────────── Команды «от модема» (для тестов) ─────────────
 
+    /// <summary>
+    /// Модем уже работает в MUX с открытыми каналами (их открыл кто-то до нас) — как при галочке
+    /// «Модем уже в MUX». На повторный SABM такой модем может не отвечать: <see cref="ModemQuirks.IgnoreSabm"/>.
+    /// </summary>
+    public void EnterMuxDirectly(params int[] dlcis)
+    {
+        _parser.Reset();
+        _parser.MaxPayloadLength = Math.Max(Math.Max(_n1, Quirks.ForceN1 ?? 0), 127);
+        _open.TryAdd(0, new ChannelContext { Echo = Quirks.Echo });
+        foreach (int dlci in dlcis)
+            _open.TryAdd(dlci, new ChannelContext { Echo = Quirks.Echo });
+        _mux = true;
+    }
+
     /// <summary>Отправить терминалу управляющее сообщение по DLC0 (модем — отвечающая сторона, C/R=0).</summary>
     public Task SendControlAsync(ControlMessage message)
         => SendFrameAsync(0, FrameType.UIH, false, false, message.Encode());

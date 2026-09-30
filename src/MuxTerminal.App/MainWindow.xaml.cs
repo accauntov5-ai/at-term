@@ -766,6 +766,9 @@ public partial class MainWindow : Window
 
         var session = _session!;
         _lastConnect = p;
+        // Эмулятор изображает модем, в котором MUX и каналы уже включены кем-то другим.
+        if (p.SkipCmux && _transport is EmulatorTransport { Emulator: { InMuxMode: false } emulator })
+            emulator.EnterMuxDirectly(p.Channels.ToArray());
         _logger?.System(LogLevel.Info, $"Старт MUX: {(p.SkipCmux ? "(модем уже в MUX)" : p.Cmux)}, каналы: {string.Join(",", p.Channels)}");
         _startCts = new CancellationTokenSource();
         _starting = true;
