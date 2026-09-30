@@ -20,6 +20,10 @@
                 <Separator />
                 <MenuItem Header="Выход" Click="Exit_Click" />
             </MenuItem>
+            <MenuItem Header="_Настройки">
+                <MenuItem Header="Отображение и подсветка…" Click="DisplaySettings_Click" InputGestureText="Ctrl+Shift+S" />
+                <MenuItem Header="Показать копилку" Click="ShowCollector_Click" />
+            </MenuItem>
             <MenuItem Header="_Окна" SubmenuOpened="WindowsMenu_SubmenuOpened">
                 <MenuItem Header="Вынести в отдельное окно" Click="LayoutMenu_Click" Tag="float" InputGestureText="Ctrl+Shift+O" />
                 <MenuItem Header="Вернуть во вкладку" Click="LayoutMenu_Click" Tag="dock" InputGestureText="Ctrl+Shift+T" />

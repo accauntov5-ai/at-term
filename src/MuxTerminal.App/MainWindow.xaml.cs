@@ -37,6 +37,9 @@ public partial class MainWindow : Window
     private IMuxTransport? _transport;
     private MuxSession? _session;
     private CancellationTokenSource? _startCts;
+    private readonly CollectorPane _collector = new();
+    private readonly LayoutDocument _collectorDoc;
+    private List<CompiledRule> _rules = new();
     private LayoutDocument? _lastActiveDoc;
     private bool _starting;
     private bool _stopping;
@@ -46,8 +49,16 @@ public partial class MainWindow : Window
     {
         InitializeComponent();
         _logPane = new TerminalPane { Dlci = 0, IsLogMode = true, IsHexMode = false };
+        _logPane.SourceName = "System Log";
         _logDoc = CreateDocument("System Log · DLC0", "log", _logPane,
             "Служебный лог: сырые MUX-кадры (HEX), канал управления DLC0, ошибки FCS");
+        _logPane.LayoutCommandRequested += (_, cmd) => ExecuteLayoutCommand(_logDoc, cmd);
+        _logPane.Collected += OnCollected;
+
+        _collectorDoc = CreateDocument("Копилка", "collector", _collector,
+            "Все строки, совпавшие с правилами поиска (меню «Настройки», «Отображение и подсветка»)");
+        _collector.LayoutCommandRequested += (_, cmd) => ExecuteLayoutCommand(_collectorDoc, cmd);
+        _collector.NavigateRequested += NavigateTo;
         _statusTimer = new DispatcherTimer(TimeSpan.FromMilliseconds(300), DispatcherPriority.Background, (_, _) => UpdateCounters(), Dispatcher);
         PreviewKeyDown += MainWindow_PreviewKeyDown;
     }
@@ -68,6 +79,8 @@ public partial class MainWindow : Window
 
         var pane = MainDocumentPane();
         pane.Children.Add(_logDoc);
+        pane.Children.Add(_collectorDoc);
+        ApplyDisplay(_settings.Display);
         if (TryParseChannels(_settings.Channels, out var channels, out _))
             foreach (var dlci in channels)
                 EnsureChannel(dlci);
@@ -92,20 +105,16 @@ public partial class MainWindow : Window
 
     // ───────────────────────────── Документы / окна ─────────────────────────────
 
-    private LayoutDocument CreateDocument(string title, string contentId, TerminalPane pane, string toolTip)
-    {
-        var doc = new LayoutDocument
+    private static LayoutDocument CreateDocument(string title, string contentId, object content, string toolTip)
+        => new()
         {
             Title = title,
             ContentId = contentId,
-            Content = pane,
-            CanClose = false, // канал нельзя потерять; окно можно только переместить
+            Content = content,
+            CanClose = false, // вкладку нельзя потерять; её можно только переместить
             CanFloat = true,
             ToolTip = toolTip,
         };
-        pane.LayoutCommandRequested += (_, cmd) => ExecuteLayoutCommand(doc, cmd);
-        return doc;
-    }
 
     private ChannelView EnsureChannel(int dlci)
     {
@@ -117,6 +126,10 @@ public partial class MainWindow : Window
         pane.OpenChannelRequested += p => _ = OpenChannelAsync(p.Dlci);
         pane.CloseChannelRequested += p => _ = CloseChannelAsync(p.Dlci);
         var doc = CreateDocument(ChannelTitle(dlci, ChannelState.Closed), $"dlc{dlci}", pane, $"Логический канал DLC {dlci}");
+        pane.LayoutCommandRequested += (_, cmd) => ExecuteLayoutCommand(doc, cmd);
+        pane.SourceName = ChannelTitle(dlci, ChannelState.Open);
+        pane.Collected += OnCollected;
+        pane.ApplyDisplay(_settings.Display, _rules);
         var view = new ChannelView(dlci, doc, pane);
         _channels[dlci] = view;
 
@@ -125,7 +138,7 @@ public partial class MainWindow : Window
         int index = target.Children.Count;
         for (int i = 0; i < target.Children.Count; i++)
         {
-            if (target.Children[i].Content is TerminalPane p && p.Dlci > dlci)
+            if (target.Children[i].Content is CollectorPane || target.Children[i].Content is TerminalPane p && p.Dlci > dlci)
             {
                 index = i;
                 break;
@@ -156,7 +169,46 @@ public partial class MainWindow : Window
     };
 
     private IEnumerable<LayoutDocument> AllDocuments()
-        => new[] { _logDoc }.Concat(_channels.Values.OrderBy(c => c.Dlci).Select(c => c.Doc));
+        => new[] { _logDoc }.Concat(_channels.Values.OrderBy(c => c.Dlci).Select(c => c.Doc)).Concat(new[] { _collectorDoc });
+
+    private IEnumerable<TerminalPane> AllPanes()
+        => new[] { _logPane }.Concat(_channels.Values.Select(c => c.Pane));
+
+    // ───────────────────────────── Оформление и «Копилка» ─────────────────────────────
+
+    private void ApplyDisplay(DisplaySettings display)
+    {
+        _settings.Display = display;
+        _rules = display.CompileRules();
+        foreach (var pane in AllPanes())
+            pane.ApplyDisplay(display, _rules);
+        _collector.ApplyDisplay(display);
+    }
+
+    private void DisplaySettings_Click(object sender, RoutedEventArgs e)
+    {
+        var dialog = new SettingsWindow(_settings.Display, d =>
+        {
+            ApplyDisplay(d);
+            _settings.Save();
+        }) { Owner = this };
+        dialog.ShowDialog();
+    }
+
+    private void ShowCollector_Click(object sender, RoutedEventArgs e) => _collectorDoc.IsActive = true;
+
+    private void OnCollected(CollectedEntry entry)
+    {
+        _collector.Add(entry);
+        _collectorDoc.Title = $"Копилка ({_collector.Count})";
+    }
+
+    private void NavigateTo(CollectedEntry entry)
+    {
+        var doc = entry.Dlci == 0 ? _logDoc : _channels.TryGetValue(entry.Dlci, out var view) ? view.Doc : null;
+        if (doc is not null)
+            doc.IsActive = true;
+    }
 
     private static bool IsInFloatingWindow(ILayoutElement element)
     {
@@ -190,18 +242,17 @@ public partial class MainWindow : Window
 
     private LayoutDocument? ActiveDocument()
     {
-        if (Dock.ActiveContent is TerminalPane p)
-            return AllDocuments().FirstOrDefault(d => d.Content == p);
+        if (Dock.ActiveContent is { } content && AllDocuments().FirstOrDefault(d => d.Content == content) is { } doc)
+            return doc;
         return _lastActiveDoc ?? AllDocuments().FirstOrDefault(d => d.IsSelected);
     }
 
     private void Dock_ActiveContentChanged(object? sender, EventArgs e)
     {
+        if (Dock.ActiveContent is { } content && AllDocuments().FirstOrDefault(d => d.Content == content) is { } doc)
+            _lastActiveDoc = doc;
         if (Dock.ActiveContent is TerminalPane p)
-        {
-            _lastActiveDoc = AllDocuments().FirstOrDefault(d => d.Content == p);
             p.Dispatcher.BeginInvoke(p.FocusInput, DispatcherPriority.Input);
-        }
     }
 
     /// <summary>
@@ -322,6 +373,12 @@ public partial class MainWindow : Window
     {
         if (Keyboard.Modifiers != (ModifierKeys.Control | ModifierKeys.Shift))
             return;
+        if (e.Key == Key.S)
+        {
+            e.Handled = true;
+            DisplaySettings_Click(this, e);
+            return;
+        }
         var doc = ActiveDocument();
         if (doc is null)
             return;
@@ -716,9 +773,10 @@ public partial class MainWindow : Window
         MessageBox.Show(this,
             $"GSM 07.10 MUX Terminal {version}\n\n" +
             "Мультиплексор 3GPP TS 27.010 (Basic Option) поверх одного COM-порта без драйверов.\n\n" +
-            "• Вкладку можно перетащить за заголовок: к краю — разделить окно, за пределы — отдельное окно.\n" +
-            "• ПКМ по заголовку вкладки — Float / Dock as Tabbed Document / New Tab Group.\n" +
-            "• Ctrl+Shift+O — вынести активную вкладку в окно, Ctrl+Shift+T — вернуть во вкладку.",
+            "- Вкладку можно перетащить за заголовок: к краю — разделить окно, за пределы — отдельное окно.\n" +
+            "- ПКМ по заголовку вкладки — Float / Dock as Tabbed Document / New Tab Group.\n" +
+            "- Ctrl+Shift+S - настройки отображения и подсветки.\n" +
+            "- Ctrl+Shift+O — вынести активную вкладку в окно, Ctrl+Shift+T — вернуть во вкладку.",
             "О программе", MessageBoxButton.OK, MessageBoxImage.Information);
     }
 

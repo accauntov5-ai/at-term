@@ -1,11 +1,15 @@
 using System.Collections.Concurrent;
 using System.Globalization;
 using System.Text;
+using System.Text.RegularExpressions;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
 using System.Windows.Media;
 using System.Windows.Threading;
+using ICSharpCode.AvalonEdit.Document;
+using ICSharpCode.AvalonEdit.Search;
+using MuxTerminal.App.Services;
 using MuxTerminal.Core.Session;
 using MuxTerminal.Core.Util;
 
@@ -23,25 +27,34 @@ public enum ChunkKind
 /// <param name="IsDataFrame">Кадр данных канала 1..63 в системном логе — может скрываться фильтром.</param>
 public sealed record TerminalChunk(DateTime Time, ChunkKind Kind, byte[] Data, string? Text = null, bool IsDataFrame = false);
 
+/// <summary>Строка, попавшая в «Копилку» по правилу поиска.</summary>
+public sealed record CollectedEntry(DateTime Time, string TimeText, string Source, int Dlci, string RuleName, Brush? Brush, string Line);
+
 /// <summary>
 /// Окно терминала одного канала (или системного лога). Данные поступают из любого потока через
 /// <see cref="Append"/> и выводятся пачками по таймеру — так UI не захлёбывается на потоке NMEA/бинарных данных.
+/// Текст раскрашивается по категориям (<see cref="StyledSpan"/>) и правилам поиска (<see cref="OutputColorizer"/>).
 /// </summary>
 public partial class TerminalPane : UserControl
 {
     private const int MaxChunks = 50_000;
     private const int MaxChars = 1_000_000;
+    private const int MaxCollectLine = 4096;
 
     private readonly ConcurrentQueue<TerminalChunk> _incoming = new();
     private readonly List<TerminalChunk> _history = new();
     private readonly List<string> _commandHistory = new();
     private readonly DispatcherTimer _flushTimer;
+    private List<StyledSpan> _spans = new();
     private Decoder _decoder = Encoding.UTF8.GetDecoder();
     private bool _atLineStart = true;
-    private int _outputLength; // TextBox.Text копирует весь текст — длину считаем сами
     private bool _pendingCr;
     private int _historyIndex = -1;
     private ChannelState _state = ChannelState.Closed;
+
+    // Сбор строк для «Копилки» идёт по принятому тексту независимо от режима отображения.
+    private readonly Decoder _collectDecoder = Encoding.UTF8.GetDecoder();
+    private readonly StringBuilder _collectLine = new();
 
     public TerminalPane()
     {
@@ -49,6 +62,15 @@ public partial class TerminalPane : UserControl
         var group = Guid.NewGuid().ToString("N");
         TextModeRadio.GroupName = group;
         HexModeRadio.GroupName = group;
+
+        Output.Document.UndoStack.SizeLimit = 0;
+        Output.Options.EnableHyperlinks = false;
+        Output.Options.EnableEmailHyperlinks = false;
+        Output.Options.EnableRectangularSelection = true;
+        Output.TextArea.Caret.CaretBrush = Brushes.Transparent;
+        Output.TextArea.TextView.LineTransformers.Add(new OutputColorizer(this));
+        SearchPanel.Install(Output); // Ctrl+F — поиск по выводу
+
         // Таймер работает и когда вкладка скрыта/перемещается между окнами — иначе очередь росла бы без ограничений.
         _flushTimer = new DispatcherTimer(TimeSpan.FromMilliseconds(50), DispatcherPriority.Background, (_, _) => Flush(), Dispatcher);
         _flushTimer.Start();
@@ -57,6 +79,9 @@ public partial class TerminalPane : UserControl
 
     /// <summary>Номер DLC; 0 — системный лог.</summary>
     public int Dlci { get; init; }
+
+    /// <summary>Имя вкладки для «Копилки».</summary>
+    public string SourceName { get; set; } = "";
 
     /// <summary>Режим лога: каждая запись — отдельная строка со временем и направлением, ввода нет.</summary>
     public bool IsLogMode
@@ -89,9 +114,28 @@ public partial class TerminalPane : UserControl
     /// <summary>Отправка данных в канал. Назначается главным окном.</summary>
     public Func<byte[], Task>? SendHandler { get; set; }
 
+    internal DisplaySettings Display { get; private set; } = DisplaySettings.CreateDefault();
+    internal List<CompiledRule> Rules { get; private set; } = new();
+    internal List<StyledSpan> Spans => _spans;
+
     public event Action<TerminalPane, string>? LayoutCommandRequested;
     public event Action<TerminalPane>? OpenChannelRequested;
     public event Action<TerminalPane>? CloseChannelRequested;
+    public event Action<CollectedEntry>? Collected;
+
+    /// <summary>Применяет оформление и правила поиска; вывод перерисовывается целиком.</summary>
+    public void ApplyDisplay(DisplaySettings display, List<CompiledRule> rules)
+    {
+        Display = display;
+        Rules = rules;
+        var font = new FontFamily(display.FontFamily);
+        Output.FontFamily = font;
+        Output.FontSize = display.FontSize;
+        Output.Background = Brushes2.Parse(display.Background) ?? Brushes.Black;
+        Output.Foreground = Brushes2.Parse(display.Foreground) ?? Brushes.Gainsboro;
+        Input.FontFamily = font;
+        RenderAll();
+    }
 
     // ───────────── Приём данных (из любого потока) ─────────────
 
@@ -101,36 +145,97 @@ public partial class TerminalPane : UserControl
     public void AppendInfo(string text, ChunkKind kind = ChunkKind.Info)
         => Append(kind, Array.Empty<byte>(), text);
 
+    /// <summary>Текст и участки категорий, накопленные за одну пачку вывода.</summary>
+    private sealed class RenderBuffer
+    {
+        public RenderBuffer(int baseOffset) => BaseOffset = baseOffset;
+
+        public int BaseOffset { get; }
+        public StringBuilder Text { get; } = new();
+        public List<StyledSpan> Spans { get; } = new();
+
+        public void Append(string s, TextCategory category, bool prefix = false)
+        {
+            if (s.Length == 0)
+                return;
+            AddSpan(s.Length, category, prefix);
+            Text.Append(s);
+        }
+
+        public void Append(char c, TextCategory category)
+        {
+            AddSpan(1, category, false);
+            Text.Append(c);
+        }
+
+        public void NewLine() => Text.Append('\n');
+
+        private void AddSpan(int length, TextCategory category, bool prefix)
+        {
+            int start = BaseOffset + Text.Length;
+            if (!prefix && Spans.Count > 0)
+            {
+                var last = Spans[Spans.Count - 1];
+                if (last.End == start && last.Category == category && !last.IsPrefix)
+                {
+                    last.Length += length;
+                    Spans[Spans.Count - 1] = last;
+                    return;
+                }
+            }
+            Spans.Add(new StyledSpan { Start = start, Length = length, Category = category, IsPrefix = prefix });
+        }
+    }
+
     private void Flush()
     {
         if (_incoming.IsEmpty)
             return;
 
-        var sb = new StringBuilder();
+        var doc = Output.Document;
+        var buf = new RenderBuffer(doc.TextLength);
         while (_incoming.TryDequeue(out var chunk))
         {
             _history.Add(chunk);
-            Render(chunk, sb);
+            CollectFrom(chunk);
+            Render(chunk, buf);
         }
         if (_history.Count > MaxChunks)
             _history.RemoveRange(0, _history.Count - MaxChunks * 4 / 5);
 
-        if (sb.Length == 0)
+        if (buf.Text.Length == 0)
             return;
 
-        bool scroll = AutoScrollCheck.IsChecked == true;
-        if (_outputLength + sb.Length > MaxChars)
-        {
-            var combined = Output.Text + sb;
-            SetOutput(Compat.TakeLast(combined, MaxChars / 2));
-        }
-        else
-        {
-            Output.AppendText(sb.ToString());
-            _outputLength += sb.Length;
-        }
-        if (scroll)
+        _spans.AddRange(buf.Spans);
+        doc.Insert(doc.TextLength, buf.Text.ToString());
+        TrimIfNeeded();
+        if (AutoScrollCheck.IsChecked == true)
             Output.ScrollToEnd();
+    }
+
+    /// <summary>Держим в окне не больше MaxChars символов: срезаем старые строки целиком.</summary>
+    private void TrimIfNeeded()
+    {
+        var doc = Output.Document;
+        if (doc.TextLength <= MaxChars)
+            return;
+        var line = doc.GetLineByOffset(doc.TextLength - MaxChars / 2);
+        int cut = line.NextLine?.Offset ?? line.EndOffset;
+        doc.Remove(0, cut);
+
+        int first = OutputColorizer.FindFirst(_spans, cut);
+        _spans.RemoveRange(0, first);
+        for (int i = 0; i < _spans.Count; i++)
+        {
+            var s = _spans[i];
+            s.Start -= cut;
+            if (s.Start < 0)
+            {
+                s.Length += s.Start;
+                s.Start = 0;
+            }
+            _spans[i] = s;
+        }
     }
 
     private void RenderAll()
@@ -138,49 +243,67 @@ public partial class TerminalPane : UserControl
         _decoder = Encoding.UTF8.GetDecoder();
         _atLineStart = true;
         _pendingCr = false;
-        var sb = new StringBuilder();
+        var buf = new RenderBuffer(0);
         int start = Math.Max(0, _history.Count - MaxChunks);
         for (int i = start; i < _history.Count; i++)
-            Render(_history[i], sb);
-        var text = sb.ToString();
-        SetOutput(text.Length > MaxChars ? Compat.TakeLast(text, MaxChars / 2) : text);
+            Render(_history[i], buf);
+        _spans = buf.Spans;
+        Output.Document.Text = buf.Text.ToString();
+        TrimIfNeeded();
         Output.ScrollToEnd();
     }
 
-    private void SetOutput(string text)
+    private static TextCategory CategoryOf(ChunkKind kind) => kind switch
     {
-        Output.Text = text;
-        _outputLength = text.Length;
+        ChunkKind.Rx => TextCategory.Rx,
+        ChunkKind.Tx => TextCategory.Tx,
+        ChunkKind.Error => TextCategory.Error,
+        _ => TextCategory.System,
+    };
+
+    private string Timestamp(DateTime time)
+    {
+        try
+        {
+            return time.ToString(Display.TimestampFormat, CultureInfo.InvariantCulture);
+        }
+        catch (FormatException)
+        {
+            return time.ToString("HH:mm:ss.fff", CultureInfo.InvariantCulture);
+        }
     }
 
-    private void Render(TerminalChunk chunk, StringBuilder sb)
+    private void Render(TerminalChunk chunk, RenderBuffer buf)
     {
         bool hex = IsHexMode;
-        bool time = TimestampCheck.IsChecked == true;
+        bool time = TimestampCheck.IsChecked == true && Display.Get(TextCategory.Timestamp).Visible;
         if (chunk.IsDataFrame && DataFramesCheck.IsChecked != true)
+            return;
+        if (chunk.Kind == ChunkKind.Info && !Display.Get(TextCategory.System).Visible)
             return;
 
         if (IsLogMode || chunk.Kind is ChunkKind.Info or ChunkKind.Error || hex)
         {
             if (!IsLogMode && chunk.Kind == ChunkKind.Tx && !hex && EchoCheck.IsChecked != true)
                 return;
-            EnsureLineStart(sb);
+            EnsureLineStart(buf);
+            var category = CategoryOf(chunk.Kind);
             if (time)
-                sb.Append(chunk.Time.ToString("HH:mm:ss.fff ", CultureInfo.InvariantCulture));
-            sb.Append(chunk.Kind switch
+                buf.Append(Timestamp(chunk.Time) + " ", TextCategory.Timestamp, prefix: true);
+            buf.Append(chunk.Kind switch
             {
                 ChunkKind.Rx => "RX  ",
                 ChunkKind.Tx => "TX  ",
                 ChunkKind.Error => "ERR ",
                 _ => IsLogMode ? "    " : "--- ",
-            });
+            }, category, prefix: true);
             if (chunk.Text is not null && (!hex || chunk.Data.Length == 0))
-                sb.Append(chunk.Text);
+                buf.Append(chunk.Text, category);
             else if (hex)
-                sb.Append(Hex.Format(chunk.Data)).Append("   |").Append(Hex.ToPrintable(chunk.Data)).Append('|');
+                buf.Append(Hex.Format(chunk.Data) + "   |" + Hex.ToPrintable(chunk.Data) + "|", category);
             else
-                sb.Append(Hex.ToPrintable(chunk.Data));
-            sb.Append('\n');
+                buf.Append(Hex.ToPrintable(chunk.Data), category);
+            buf.NewLine();
             _atLineStart = true;
             return;
         }
@@ -189,6 +312,7 @@ public partial class TerminalPane : UserControl
         if (chunk.Kind == ChunkKind.Tx && EchoCheck.IsChecked != true)
             return;
 
+        var dataCategory = CategoryOf(chunk.Kind);
         var chars = new char[_decoder.GetCharCount(chunk.Data, 0, chunk.Data.Length)];
         _decoder.GetChars(chunk.Data, 0, chunk.Data.Length, chars, 0);
         foreach (char c in chars)
@@ -200,33 +324,100 @@ public partial class TerminalPane : UserControl
                     _pendingCr = false;
                     continue; // \r\n — один перевод строки
                 }
-                sb.Append('\n');
+                buf.NewLine();
                 _atLineStart = true;
                 continue;
             }
             _pendingCr = false;
             if (c == '\r')
             {
-                sb.Append('\n');
+                buf.NewLine();
                 _atLineStart = true;
                 _pendingCr = true;
                 continue;
             }
             if (_atLineStart && time)
-                sb.Append(chunk.Time.ToString("[HH:mm:ss.fff] ", CultureInfo.InvariantCulture));
+                buf.Append("[" + Timestamp(chunk.Time) + "] ", TextCategory.Timestamp, prefix: true);
             _atLineStart = false;
             // Управляющие символы показываем как Unicode Control Pictures (␚ для Ctrl+Z и т.п.).
-            sb.Append(c < 0x20 && c != '\t' ? (char)(0x2400 + c) : c);
+            buf.Append(c < 0x20 && c != '\t' ? (char)(0x2400 + c) : c, dataCategory);
         }
     }
 
-    private void EnsureLineStart(StringBuilder sb)
+    private void EnsureLineStart(RenderBuffer buf)
     {
         if (_atLineStart)
             return;
-        sb.Append('\n');
+        buf.NewLine();
         _atLineStart = true;
         _pendingCr = false;
+    }
+
+    /// <summary>Начало «содержимого» строки — после метки времени и направления (к нему применяются правила поиска).</summary>
+    internal int GetContentStart(DocumentLine line)
+    {
+        int pos = line.Offset;
+        for (int i = OutputColorizer.FindFirst(_spans, pos); i < _spans.Count && _spans[i].Start == pos && _spans[i].IsPrefix; i++)
+            pos = _spans[i].End;
+        return Math.Min(pos, line.EndOffset);
+    }
+
+    // ───────────── Копилка ─────────────
+
+    private void CollectFrom(TerminalChunk chunk)
+    {
+        if (Collected is null || !Rules.Any(r => r.Rule.Collect))
+            return;
+
+        if (IsLogMode)
+        {
+            // В логе — только сообщения терминала и ошибки (данные каналов собираются в их вкладках).
+            if (chunk.Kind is ChunkKind.Info or ChunkKind.Error && chunk.Text is not null)
+                foreach (var line in chunk.Text.Split('\n'))
+                    TryCollect(line, chunk.Time);
+            return;
+        }
+
+        if (chunk.Kind != ChunkKind.Rx)
+            return;
+        var chars = new char[_collectDecoder.GetCharCount(chunk.Data, 0, chunk.Data.Length)];
+        _collectDecoder.GetChars(chunk.Data, 0, chunk.Data.Length, chars, 0);
+        foreach (char c in chars)
+        {
+            if (c is '\r' or '\n')
+            {
+                if (_collectLine.Length > 0)
+                    TryCollect(_collectLine.ToString(), chunk.Time);
+                _collectLine.Clear();
+            }
+            else if (_collectLine.Length < MaxCollectLine)
+            {
+                _collectLine.Append(c);
+            }
+        }
+    }
+
+    private void TryCollect(string line, DateTime time)
+    {
+        line = line.Trim();
+        if (line.Length == 0)
+            return;
+        foreach (var rule in Rules)
+        {
+            if (!rule.Rule.Collect)
+                continue;
+            try
+            {
+                if (!rule.Regex.IsMatch(line))
+                    continue;
+            }
+            catch (RegexMatchTimeoutException)
+            {
+                continue;
+            }
+            Collected?.Invoke(new CollectedEntry(time, Timestamp(time), SourceName, Dlci, rule.Rule.Name, rule.Foreground ?? Brushes2.Parse(Display.Foreground), line));
+            return; // одна строка — одна запись (первое подходящее правило)
+        }
     }
 
     public string GetPlainText()
@@ -368,7 +559,8 @@ public partial class TerminalPane : UserControl
     {
         while (_incoming.TryDequeue(out _)) { }
         _history.Clear();
-        SetOutput("");
+        _spans = new List<StyledSpan>();
+        Output.Document.Text = "";
         _atLineStart = true;
         _pendingCr = false;
         _decoder = Encoding.UTF8.GetDecoder();
@@ -383,7 +575,7 @@ public partial class TerminalPane : UserControl
     private void Wrap_Changed(object sender, RoutedEventArgs e)
     {
         if (Output is not null)
-            Output.TextWrapping = WrapCheck.IsChecked == true ? TextWrapping.Wrap : TextWrapping.NoWrap;
+            Output.WordWrap = WrapCheck.IsChecked == true;
     }
 
     private void Layout_Click(object sender, RoutedEventArgs e)

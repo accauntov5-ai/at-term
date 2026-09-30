@@ -13,6 +13,9 @@ public sealed class AppSettings
     public string CmuxCommand { get; set; } = "AT+CMUX=0";
     public string Channels { get; set; } = "1,2,3";
     public bool SkipCmux { get; set; }
+    /// <summary>Оформление вывода, правила подсветки и «Копилки».</summary>
+    public DisplaySettings Display { get; set; } = DisplaySettings.CreateDefault();
+
     public Dictionary<int, string> ChannelNames { get; set; } = new()
     {
         [1] = "AT",
@@ -28,7 +31,12 @@ public sealed class AppSettings
         try
         {
             if (File.Exists(FilePath))
-                return JsonSerializer.Deserialize<AppSettings>(File.ReadAllText(FilePath)) ?? new AppSettings();
+            {
+                var settings = JsonSerializer.Deserialize<AppSettings>(File.ReadAllText(FilePath)) ?? new AppSettings();
+                settings.Display ??= DisplaySettings.CreateDefault();
+                settings.Display.Normalize();
+                return settings;
+            }
         }
         catch
         {
