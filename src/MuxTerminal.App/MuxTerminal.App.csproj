@@ -9,6 +9,7 @@
     <RootNamespace>MuxTerminal.App</RootNamespace>
     <AssemblyName>MuxTerminal</AssemblyName>
     <ApplicationManifest>app.manifest</ApplicationManifest>
+    <ApplicationIcon>Assets\app.ico</ApplicationIcon>
     <SatelliteResourceLanguages>ru;en</SatelliteResourceLanguages>
   </PropertyGroup>
 
@@ -30,6 +31,14 @@
       <PrivateAssets>all</PrivateAssets>
     </PackageReference>
     <PackageReference Include="System.Text.Json" Version="8.0.5" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Resource Include="Assets\app.ico" />
+    <Resource Include="Assets\app.png" />
+    <!-- Тексты лицензий показываются в окне «О программе». -->
+    <EmbeddedResource Include="..\..\LICENSE" LogicalName="LICENSE" Link="Assets\LICENSE" />
+    <EmbeddedResource Include="..\..\THIRD-PARTY-NOTICES.txt" LogicalName="THIRD-PARTY-NOTICES.txt" Link="Assets\THIRD-PARTY-NOTICES.txt" />
   </ItemGroup>
 
   <ItemGroup>

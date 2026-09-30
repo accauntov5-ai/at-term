@@ -65,6 +65,7 @@ dotnet build src\MuxTerminal.App -c Release
 встроены в exe с помощью Costura.Fody. Клиенту передаётся только этот файл: установка не нужна, настройки
 сохраняются в `%AppData%\MuxTerminal\settings.json`.
 Рядом лежит `MuxTerminal.exe.config` — его можно не передавать (он лишь фиксирует версию .NET Framework 4.8).
+Там же `LICENSE` и `THIRD-PARTY-NOTICES.txt`; их тексты встроены и в exe (меню «Справка» → «О программе»).
 
 GitHub Actions (`.github/workflows/build.yml`) на каждый push собирает exe на Windows, прогоняет тесты
 (net8.0 и net48) и выкладывает артефакт `MuxTerminal-exe`.
@@ -149,3 +150,11 @@ ln -s /dev/ttyUSB0 ~/.wine-mux/dosdevices/com3    # в программе выб
 * Интерфейс проверен в Wine (см. выше), включая раскраску, настройки, правила и «Копилку».
 * На реальном модеме и на реальной Windows 7 не проверялось. Если модему нужны особые параметры, укажите их в поле
   «Команда», например `AT+CMUX=0,0,5,127,10,3,30,10,2`.
+
+## Лицензия
+
+MIT — см. [LICENSE](LICENSE). Лицензии встроенных сторонних компонентов (AvalonDock — Ms-PL, AvalonEdit и Costura — MIT,
+библиотеки .NET от Microsoft — MIT) — в [THIRD-PARTY-NOTICES.txt](THIRD-PARTY-NOTICES.txt); файл собирается скриптом
+`tools/make_notices.py` из самих пакетов NuGet. Microsoft .NET Framework 4.8 в программу не входит.
+
+Иконка генерируется скриптом `tools/make_icon.py` (Pillow).

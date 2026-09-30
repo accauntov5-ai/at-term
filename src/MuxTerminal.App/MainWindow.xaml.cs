@@ -48,6 +48,7 @@ public partial class MainWindow : Window
     public MainWindow()
     {
         InitializeComponent();
+        Title = AppInfo.Title;
         _logPane = new TerminalPane { Dlci = 0, IsLogMode = true, IsHexMode = false };
         _logPane.SourceName = "System Log";
         _logDoc = CreateDocument("System Log · DLC0", "log", _logPane,
@@ -767,18 +768,7 @@ public partial class MainWindow : Window
             File.WriteAllText(dialog.FileName, pane.GetPlainText());
     }
 
-    private void About_Click(object sender, RoutedEventArgs e)
-    {
-        var version = Assembly.GetExecutingAssembly().GetName().Version;
-        MessageBox.Show(this,
-            $"GSM 07.10 MUX Terminal {version}\n\n" +
-            "Мультиплексор 3GPP TS 27.010 (Basic Option) поверх одного COM-порта без драйверов.\n\n" +
-            "- Вкладку можно перетащить за заголовок: к краю — разделить окно, за пределы — отдельное окно.\n" +
-            "- ПКМ по заголовку вкладки — Float / Dock as Tabbed Document / New Tab Group.\n" +
-            "- Ctrl+Shift+S - настройки отображения и подсветки.\n" +
-            "- Ctrl+Shift+O — вынести активную вкладку в окно, Ctrl+Shift+T — вернуть во вкладку.",
-            "О программе", MessageBoxButton.OK, MessageBoxImage.Information);
-    }
+    private void About_Click(object sender, RoutedEventArgs e) => new AboutWindow { Owner = this }.ShowDialog();
 
     private void Exit_Click(object sender, RoutedEventArgs e) => Close();
 

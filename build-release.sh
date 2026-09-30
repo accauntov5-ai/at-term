@@ -7,4 +7,5 @@ dotnet build src/MuxTerminal.App -c Release
 rm -rf dist && mkdir -p dist
 cp src/MuxTerminal.App/bin/Release/net48/MuxTerminal.exe dist/
 cp src/MuxTerminal.App/bin/Release/net48/MuxTerminal.exe.config dist/
+cp LICENSE THIRD-PARTY-NOTICES.txt dist/
 echo "Готово: dist/MuxTerminal.exe"

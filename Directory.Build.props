@@ -4,8 +4,17 @@
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <TreatWarningsAsErrors>false</TreatWarningsAsErrors>
-    <Company>GSM 07.10 MUX Terminal</Company>
-    <Product>GSM 07.10 MUX Terminal Client</Product>
+
+    <!-- Сведения о программе: видны в «Свойства → Подробно» у exe и в окне «О программе». -->
     <Version>1.0.0</Version>
+    <Product>GSM 07.10 MUX Terminal</Product>
+    <Company>accauntov5-ai</Company>
+    <Authors>accauntov5-ai</Authors>
+    <Copyright>Copyright © 2026 accauntov5-ai. MIT License.</Copyright>
+    <Description>Терминал для сотовых модемов: мультиплексор GSM 07.10 (3GPP TS 27.010) на одном COM-порту, каналы в отдельных вкладках и окнах.</Description>
+    <RepositoryUrl>https://github.com/accauntov5-ai/at-term</RepositoryUrl>
   </PropertyGroup>
+  <ItemGroup>
+    <AssemblyMetadata Include="RepositoryUrl" Value="$(RepositoryUrl)" />
+  </ItemGroup>
 </Project>

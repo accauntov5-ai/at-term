@@ -27,3 +27,5 @@ jobs:
           path: |
             src/MuxTerminal.App/bin/Release/net48/MuxTerminal.exe
             src/MuxTerminal.App/bin/Release/net48/MuxTerminal.exe.config
+            LICENSE
+            THIRD-PARTY-NOTICES.txt
