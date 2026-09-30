@@ -1,0 +1,11 @@
+<Project>
+  <PropertyGroup>
+    <LangVersion>latest</LangVersion>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <TreatWarningsAsErrors>false</TreatWarningsAsErrors>
+    <Company>GSM 07.10 MUX Terminal</Company>
+    <Product>GSM 07.10 MUX Terminal Client</Product>
+    <Version>1.0.0</Version>
+  </PropertyGroup>
+</Project>
