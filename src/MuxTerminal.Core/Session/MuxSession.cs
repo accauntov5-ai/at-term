@@ -107,8 +107,10 @@ public sealed class MuxSession : IAsyncDisposable
     {
         _options = options;
         MaxFrameSize = options.MaxFrameSize;
-        // Заголовок с запасом: модемы иногда игнорируют N1 для служебных кадров.
-        _parser.MaxPayloadLength = Math.Max(MaxFrameSize, 127);
+        // Принимаем кадры любой длины: N1 ограничивает только то, что отправляем мы. Модемы бывает игнорируют N1,
+        // а при «Модем уже в MUX» реальный N1 модема нам вообще неизвестен. Ложные заголовки с большой длиной
+        // парсер отбрасывает сам, как только за ними находится целый кадр.
+        _parser.MaxPayloadLength = FrameConstants.MaxLength;
     }
 
     /// <summary>
