@@ -40,6 +40,7 @@
 ./build-release.sh        # Linux / macOS → dist/MuxTerminal.exe
 build-release.cmd         # Windows
 dotnet test tests/MuxTerminal.Core.Tests
+start /wait MuxTerminal.exe --selftest   # на машине клиента (cmd): код выхода 0 — всё работает (см. selftest.log)
 ```
 
 Подробнее: [технические детали, уточнения к ТЗ, покрытие тестами](docs/DETAILS.md) ·

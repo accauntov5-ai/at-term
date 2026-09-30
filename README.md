@@ -42,6 +42,7 @@ The interface is in Russian; button names are given in brackets.
 ./build-release.sh        # Linux / macOS → dist/MuxTerminal.exe
 build-release.cmd         # Windows
 dotnet test tests/MuxTerminal.Core.Tests
+start /wait MuxTerminal.exe --selftest   # on the target PC (cmd): exit code 0 = works (see selftest.log)
 ```
 
 More: [technical details, spec notes, test coverage](docs/DETAILS.md) (Russian) ·
